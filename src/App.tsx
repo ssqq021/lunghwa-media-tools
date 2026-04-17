@@ -64,6 +64,7 @@ const DEFAULT_CROP_WIDTH_PERCENT = 100;
 const DEFAULT_CROP_HEIGHT_PERCENT = 100;
 const MAX_EXTRACTED_FRAMES = 180;
 const BRAND_ASSET_PATH = `${import.meta.env.BASE_URL}logo.jpg`;
+const GAME_SFX_LAB_URL = 'https://mowangblog.github.io/game-sfx-generator-web/';
 const EXPORT_PRESETS = [
   { value: 'original', label: '原始比例', frameSize: undefined },
   { value: '32', label: '32 × 32', frameSize: 32 },
@@ -1663,6 +1664,14 @@ function App() {
                   {link.label}
                 </a>
               ))}
+              <a
+                className="hero-link"
+                href={GAME_SFX_LAB_URL}
+                target="_blank"
+                rel="noreferrer"
+              >
+                独立版音效生成器
+              </a>
             </div>
           </div>
         </section>
