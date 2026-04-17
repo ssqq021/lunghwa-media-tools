@@ -163,6 +163,21 @@ button {
   white-space: nowrap;
 }
 
+.hero-tool-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.hero-tool-copy {
+  margin: 0;
+  color: #5b6472;
+  font-size: 0.96rem;
+  line-height: 1.6;
+}
+
+
 .hero-support-row {
   display: flex;
   align-items: center;

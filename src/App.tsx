@@ -1647,6 +1647,19 @@ function App() {
             <span className="hero-title__main">视频转序列帧表</span>
             <span className="hero-title__version">2.0</span>
           </h1>
+          <div className="hero-tool-row">
+            <p className="hero-tool-copy">{'\u66F4\u591A\u5DE5\u5177\uFF1A'}</p>
+            <div className="hero-links">
+              <a
+                className="hero-link"
+                href={GAME_SFX_LAB_URL}
+                target="_blank"
+                rel="noreferrer"
+              >
+                游戏音效生成器
+              </a>
+            </div>
+          </div>
           <div className="hero-support-row">
             <p className="hero-copy">永久免费工具，欢迎一键三连➕关注支持更新。</p>
             <div className="hero-links">
@@ -1664,14 +1677,6 @@ function App() {
                   {link.label}
                 </a>
               ))}
-              <a
-                className="hero-link"
-                href={GAME_SFX_LAB_URL}
-                target="_blank"
-                rel="noreferrer"
-              >
-                独立版音效生成器
-              </a>
             </div>
           </div>
         </section>
