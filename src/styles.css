@@ -211,6 +211,17 @@ button {
     box-shadow 180ms ease;
 }
 
+.hero-link--button {
+  cursor: pointer;
+}
+
+.hero-link.is-active {
+  border-color: rgba(16, 185, 129, 0.38);
+  background: rgba(240, 253, 248, 0.96);
+  color: #0f766e;
+  box-shadow: 0 16px 28px rgba(16, 185, 129, 0.14);
+}
+
 .hero-link__icon {
   display: inline-flex;
   width: 22px;
@@ -417,6 +428,14 @@ button {
   color: #6a7783;
   font-size: 0.88rem;
   font-weight: 700;
+}
+
+.image-preview-card {
+  min-height: 180px;
+}
+
+.image-preview-card .option-card {
+  height: 100%;
 }
 
 .upload-video-preview {

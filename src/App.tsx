@@ -47,6 +47,7 @@ import {
   revokeVideoAsset,
   type VideoFrameReader,
 } from './lib/video';
+import ImageCutoutTool from './ImageCutoutTool';
 
 const DEFAULT_FRAMES_PER_SECOND = 12;
 const DEFAULT_COLUMNS = 4;
@@ -110,6 +111,7 @@ type SpinePreviewMode = 'animation';
 
 type SupportPlatform = (typeof SUPPORT_LINKS)[number]['id'];
 type ExportPresetValue = (typeof EXPORT_PRESETS)[number]['value'];
+type AppMode = 'sheet' | 'cutout';
 
 type DragSelection = {
   start: SamplePoint;
@@ -348,6 +350,7 @@ function SupportLogo({ platform }: { platform: SupportPlatform }) {
 
 function App() {
   const currentYear = new Date().getFullYear();
+  const [appMode, setAppMode] = useState<AppMode>('sheet');
   const [videoMeta, setVideoMeta] = useState<VideoMeta | null>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
   const [isChromaStageOpen, setIsChromaStageOpen] = useState(false);
@@ -591,6 +594,7 @@ function App() {
     tolerance,
   ]);
 
+  const isCutoutMode = appMode === 'cutout';
   const canGenerate = Boolean(
     videoMeta &&
       videoUrl &&
@@ -601,7 +605,7 @@ function App() {
   );
   const showChromaStage = Boolean(videoMeta && isChromaStageOpen);
   const showResultStage = Boolean(result);
-  const showSpineStage = Boolean(spineDraft);
+  const showSpineStage = Boolean(!isCutoutMode && spineDraft);
   const animationFrames = useMemo<ExtractedFrame[]>(() => {
     if (processedFrames) {
       return toTransparentSheetFrames(processedFrames);
@@ -1625,6 +1629,28 @@ function App() {
     }
   }
 
+  function switchAppMode(nextMode: AppMode): void {
+    setAppMode(nextMode);
+    setSpineDraft(null);
+    setSamplePoint(null);
+    setColorSample(null);
+    setPreviewMode('result');
+
+    if (nextMode === 'cutout') {
+      setIsChromaStageOpen(false);
+      setReferenceRawFrame(null);
+      setReferenceFrame(null);
+      setReferenceResultFrame(null);
+      setReferenceMaskFrame(null);
+    }
+
+    clearGeneratedAssets(
+      nextMode === 'cutout'
+        ? '已切换到图片背景抠图功能，请上传图片并点选背景颜色。'
+        : '已切换回视频转序列帧表。'
+    );
+  }
+
   return (
     <div className="page-shell">
       <div className="ambient ambient-a" />
@@ -1644,12 +1670,19 @@ function App() {
             </div>
           </div> */}
           <h1 className="hero-title">
-            <span className="hero-title__main">视频转序列帧表</span>
-            <span className="hero-title__version">2.0</span>
+            <span className="hero-title__main">{isCutoutMode ? '背景抠图工具' : '视频转序列帧表'}</span>
+            <span className="hero-title__version">{isCutoutMode ? '1.0' : '2.0'}</span>
           </h1>
           <div className="hero-tool-row">
             <p className="hero-tool-copy">{'\u66F4\u591A\u5DE5\u5177\uFF1A'}</p>
             <div className="hero-links">
+              <button
+                className={`hero-link hero-link--button ${isCutoutMode ? 'is-active' : ''}`}
+                type="button"
+                onClick={() => switchAppMode(isCutoutMode ? 'sheet' : 'cutout')}
+              >
+                {isCutoutMode ? '序列帧工具' : '背景抠图工具'}
+              </button>
               <a
                 className="hero-link"
                 href={GAME_SFX_LAB_URL}
@@ -1683,6 +1716,9 @@ function App() {
 
         <div className="status-banner status-banner--global">{status}</div>
 
+        {isCutoutMode ? (
+          <ImageCutoutTool onStatusChange={setStatus} />
+        ) : (
         <section className="workspace-grid workspace-grid--single">
           <div className="panel upload-panel">
             <div className="panel-head">
@@ -1738,8 +1774,9 @@ function App() {
 
           </div>
         </section>
+        )}
 
-        {videoMeta ? (
+        {!isCutoutMode && videoMeta ? (
           <section ref={cropPanelRef} className="crop-row">
             <div className="crop-picker crop-picker--row">
               <div className="crop-preview-grid">
@@ -1957,7 +1994,11 @@ function App() {
                         setReferenceTime(firstSampleTime);
                         setIsChromaStageOpen(true);
                         pendingChromaScrollRef.current = true;
-                        setStatus('已提取片段中的第一张参考帧，可直接生成序列图，或先点背景颜色再做抠图。');
+                        setStatus(
+                          isCutoutMode
+                            ? '已提取参考帧，请点击背景颜色开始抠图。'
+                            : '已提取片段中的第一张参考帧，可直接生成序列图，或先点背景颜色再做抠图。'
+                        );
                       }}
                   >
                     {isChromaStageOpen ? '重新提取参考帧' : '提取帧'}
@@ -1973,7 +2014,7 @@ function App() {
           </section>
         ) : null}
 
-        {showChromaStage ? (
+        {!isCutoutMode && showChromaStage ? (
         <section ref={chromaPanelRef} className="panel chroma-panel">
           <div className="panel-head panel-head--stack">
             <div>
@@ -2163,14 +2204,16 @@ function App() {
                   type="button"
                   onClick={() => void handleGeneratePreview()}
                 >
-                  {isRendering ? '正在生成序列图...' : '4. 生成序列图'}
+                  {isRendering
+                    ? '正在生成序列图...'
+                    : '4. 生成序列图'}
                 </button>
               </div>
           </>
         </section>
         ) : null}
 
-        {showResultStage ? (
+        {!isCutoutMode && showResultStage ? (
         <section ref={resultPanelRef} className="result-grid">
           <div className="panel preview-panel">
             <div className="panel-head">
@@ -2523,7 +2566,7 @@ function App() {
             />
             <div className="app-footer__copy">
               <strong>© {currentYear} 今天又被Godot打了</strong>
-              <span>视频转序列帧表</span>
+              <span>{isCutoutMode ? '背景抠图工具' : '视频转序列帧表'}</span>
             </div>
           </div>
           <p className="app-footer__note">永久免费工具，欢迎一键三连➕关注支持更新。</p>
