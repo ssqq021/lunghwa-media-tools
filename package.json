@@ -14,7 +14,8 @@
     "jszip": "^3.10.1",
     "pica": "^9.0.1",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "upng-js": "^2.1.0"
   },
   "devDependencies": {
     "@testing-library/jest-dom": "^6.6.3",

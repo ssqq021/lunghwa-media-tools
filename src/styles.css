@@ -1240,6 +1240,29 @@ button {
   color: #6b7280;
 }
 
+.range-field__row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.range-field__row input[type="range"] {
+  flex: 1;
+  accent-color: #7c3aed;
+}
+
+.range-field__num {
+  flex: 0 0 96px;
+  width: 96px;
+  min-height: 44px;
+  padding: 8px 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(113, 92, 255, 0.12);
+  background: #fbfcff;
+  color: #132238;
+  text-align: center;
+}
+
 .toggle-group {
   display: grid;
   gap: 12px;
@@ -1602,4 +1625,217 @@ button {
   .hero-copy {
     white-space: normal;
   }
+}
+
+/* 图片尺寸工具 */
+.resize-settings {
+  margin-bottom: 18px;
+}
+
+.resize-inputs {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 14px;
+  margin: 14px 0 4px;
+}
+
+.resize-fit {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 6px 0 4px;
+}
+
+.resize-fit > span {
+  color: #6a7783;
+  font-weight: 600;
+}
+
+.resize-hint {
+  margin: 12px 0 0;
+  color: #6a7783;
+  font-size: 0.92rem;
+}
+
+.resize-hint strong {
+  color: #132238;
+}
+
+.resize-results {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
+.resize-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.resize-card .resize-thumb {
+  width: 100%;
+  max-height: 220px;
+  object-fit: contain;
+  border-radius: 14px;
+  border: 1px solid rgba(113, 92, 255, 0.1);
+  background:
+    repeating-conic-gradient(#eceff5 0% 25%, #fafbff 0% 50%) 50% / 16px 16px;
+}
+
+.resize-thumb--empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 120px;
+  color: #b42318;
+  font-size: 0.9rem;
+}
+
+.resize-card__meta {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.resize-card__meta strong {
+  word-break: break-word;
+}
+
+.resize-card__meta small {
+  color: #6a7783;
+}
+
+.resize-card__actions {
+  display: flex;
+  gap: 10px;
+}
+
+.resize-card__actions .secondary-button,
+.resize-card__actions .ghost-button {
+  flex: 1;
+  min-height: 44px;
+}
+
+.resize-badge {
+  align-self: flex-start;
+  padding: 3px 12px;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  color: #6d28d9;
+  background: rgba(109, 40, 217, 0.1);
+}
+
+.resize-badge--skip {
+  color: #b45309;
+  background: rgba(217, 119, 6, 0.12);
+}
+
+.resize-badge--err {
+  color: #b42318;
+  background: rgba(180, 35, 24, 0.12);
+}
+
+/* 图片压缩工具：拖动对照 */
+.compare {
+  position: relative;
+  width: 100%;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid rgba(113, 92, 255, 0.1);
+  background:
+    repeating-conic-gradient(#eceff5 0% 25%, #fafbff 0% 50%) 50% / 16px 16px;
+  line-height: 0;
+  cursor: ew-resize;
+  touch-action: none;
+  user-select: none;
+}
+
+.compare__after,
+.compare__before {
+  display: block;
+  width: 100%;
+  height: auto;
+  max-height: 280px;
+  object-fit: contain;
+  -webkit-user-drag: none;
+  user-select: none;
+  pointer-events: none;
+}
+
+.compare__after {
+  position: relative;
+}
+
+.compare__before {
+  position: absolute;
+  inset: 0;
+  height: 100%;
+}
+
+.compare__divider {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: #ffffff;
+  box-shadow: 0 0 0 1px rgba(19, 34, 56, 0.18);
+  transform: translateX(-1px);
+}
+
+.compare__grip {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 6px 16px rgba(19, 34, 56, 0.28);
+  transform: translate(-50%, -50%);
+}
+
+.compare__grip::before,
+.compare__grip::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  width: 0;
+  height: 0;
+  border: 5px solid transparent;
+  transform: translateY(-50%);
+}
+
+.compare__grip::before {
+  left: 5px;
+  border-right-color: #6d28d9;
+}
+
+.compare__grip::after {
+  right: 5px;
+  border-left-color: #6d28d9;
+}
+
+.compare__tag {
+  position: absolute;
+  bottom: 8px;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: rgba(19, 34, 56, 0.62);
+  color: #ffffff;
+  font-size: 0.74rem;
+  font-weight: 600;
+  line-height: 1.1;
+  pointer-events: none;
+}
+
+.compare__tag--before {
+  left: 8px;
+}
+
+.compare__tag--after {
+  right: 8px;
 }

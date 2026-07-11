@@ -48,6 +48,8 @@ import {
   type VideoFrameReader,
 } from './lib/video';
 import ImageCutoutTool from './ImageCutoutTool';
+import ImageResizeTool from './ImageResizeTool';
+import ImageCompressTool from './ImageCompressTool';
 
 const DEFAULT_FRAMES_PER_SECOND = 12;
 const DEFAULT_COLUMNS = 4;
@@ -111,7 +113,7 @@ type SpinePreviewMode = 'animation';
 
 type SupportPlatform = (typeof SUPPORT_LINKS)[number]['id'];
 type ExportPresetValue = (typeof EXPORT_PRESETS)[number]['value'];
-type AppMode = 'sheet' | 'cutout';
+type AppMode = 'sheet' | 'cutout' | 'resize' | 'compress';
 
 type DragSelection = {
   start: SamplePoint;
@@ -595,6 +597,8 @@ function App() {
   ]);
 
   const isCutoutMode = appMode === 'cutout';
+  const isResizeMode = appMode === 'resize';
+  const isCompressMode = appMode === 'compress';
   const canGenerate = Boolean(
     videoMeta &&
       videoUrl &&
@@ -1647,7 +1651,11 @@ function App() {
     clearGeneratedAssets(
       nextMode === 'cutout'
         ? '已切换到图片背景抠图功能，请上传图片并点选背景颜色。'
-        : '已切换回视频转序列帧表。'
+        : nextMode === 'resize'
+          ? '已切换到图片尺寸工具，请上传图片并设置目标尺寸。'
+          : nextMode === 'compress'
+            ? '已切换到图片压缩工具，请上传图片并设置压缩参数。'
+            : '已切换回视频转序列帧表。'
     );
   }
 
@@ -1670,18 +1678,49 @@ function App() {
             </div>
           </div> */}
           <h1 className="hero-title">
-            <span className="hero-title__main">{isCutoutMode ? '背景抠图工具' : '视频转序列帧表'}</span>
-            <span className="hero-title__version">{isCutoutMode ? '1.0' : '2.0'}</span>
+            <span className="hero-title__main">
+              {isCutoutMode
+                ? '背景抠图工具'
+                : isResizeMode
+                  ? '图片尺寸工具'
+                  : isCompressMode
+                    ? '图片压缩工具'
+                    : '视频转序列帧表'}
+            </span>
+            <span className="hero-title__version">
+              {isCutoutMode || isResizeMode || isCompressMode ? '1.0' : '2.0'}
+            </span>
           </h1>
           <div className="hero-tool-row">
             <p className="hero-tool-copy">{'\u66F4\u591A\u5DE5\u5177\uFF1A'}</p>
             <div className="hero-links">
               <button
+                className={`hero-link hero-link--button ${!isCutoutMode && !isResizeMode && !isCompressMode ? 'is-active' : ''}`}
+                type="button"
+                onClick={() => switchAppMode('sheet')}
+              >
+                序列帧工具
+              </button>
+              <button
                 className={`hero-link hero-link--button ${isCutoutMode ? 'is-active' : ''}`}
                 type="button"
-                onClick={() => switchAppMode(isCutoutMode ? 'sheet' : 'cutout')}
+                onClick={() => switchAppMode('cutout')}
               >
-                {isCutoutMode ? '序列帧工具' : '背景抠图工具'}
+                背景抠图工具
+              </button>
+              <button
+                className={`hero-link hero-link--button ${isResizeMode ? 'is-active' : ''}`}
+                type="button"
+                onClick={() => switchAppMode('resize')}
+              >
+                图片尺寸工具
+              </button>
+              <button
+                className={`hero-link hero-link--button ${isCompressMode ? 'is-active' : ''}`}
+                type="button"
+                onClick={() => switchAppMode('compress')}
+              >
+                图片压缩工具
               </button>
               <a
                 className="hero-link"
@@ -1718,6 +1757,10 @@ function App() {
 
         {isCutoutMode ? (
           <ImageCutoutTool onStatusChange={setStatus} />
+        ) : isResizeMode ? (
+          <ImageResizeTool onStatusChange={setStatus} />
+        ) : isCompressMode ? (
+          <ImageCompressTool onStatusChange={setStatus} />
         ) : (
         <section className="workspace-grid workspace-grid--single">
           <div className="panel upload-panel">
