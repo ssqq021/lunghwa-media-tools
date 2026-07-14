@@ -4,7 +4,7 @@
 当前版本支持浏览器内裁剪、按片段提帧、点选背景色抠图、导出精灵图、动画 GIF、透明单帧 ZIP，以及进一步生成 Spine 动画资源包。
 
 在线地址：
-[https://mowangblog.github.io/video-timesheet-web/](https://mowangblog.github.io/video-timesheet-web/)
+请部署后替换为你自己的站点地址。
 
 ## 主要能力
 
@@ -140,7 +140,7 @@ npm run build
 3. 后续每次 push 到 `main` 都会自动部署
 
 最终地址：
-[https://mowangblog.github.io/video-timesheet-web/](https://mowangblog.github.io/video-timesheet-web/)
+部署完成后以你自己的发布地址为准。
 
 ## 使用建议
 

@@ -26,6 +26,47 @@ function createCanvas(width: number, height: number): HTMLCanvasElement {
   return canvas;
 }
 
+function cloneCanvas(source: HTMLCanvasElement): HTMLCanvasElement {
+  const canvas = createCanvas(source.width, source.height);
+  const context = canvas.getContext('2d');
+  if (!context) {
+    throw new Error('无法复制画布。');
+  }
+
+  context.drawImage(source, 0, 0);
+  return canvas;
+}
+
+function createMaskFromAlpha(source: HTMLCanvasElement): HTMLCanvasElement {
+  const sourceContext = source.getContext('2d');
+  if (!sourceContext) {
+    throw new Error('无法读取透明遮罩。');
+  }
+
+  const sourceImageData = sourceContext.getImageData(0, 0, source.width, source.height);
+  const sourcePixels = sourceImageData.data;
+  const maskCanvas = createCanvas(source.width, source.height);
+  const maskContext = maskCanvas.getContext('2d');
+
+  if (!maskContext) {
+    throw new Error('无法创建透明遮罩。');
+  }
+
+  const maskImageData = maskContext.createImageData(source.width, source.height);
+  const maskPixels = maskImageData.data;
+
+  for (let index = 0; index < sourcePixels.length; index += 4) {
+    const alpha = sourcePixels[index + 3];
+    maskPixels[index] = alpha;
+    maskPixels[index + 1] = alpha;
+    maskPixels[index + 2] = alpha;
+    maskPixels[index + 3] = 255;
+  }
+
+  maskContext.putImageData(maskImageData, 0, 0);
+  return maskCanvas;
+}
+
 function getDominantChannel(sample: RGBColor): 'r' | 'g' | 'b' {
   if (sample.r >= sample.g && sample.r >= sample.b) {
     return 'r';
@@ -201,6 +242,7 @@ export function applyColorKey(
       g: sourcePixels[index + 1],
       b: sourcePixels[index + 2],
     };
+    const sourceAlpha = sourcePixels[index + 3];
 
     const distance = computeColorDistance(pixel, options.sample.rgb, options.algorithm);
     const opacity = getOpacityForDistance(
@@ -218,7 +260,7 @@ export function applyColorKey(
       options.despillEnabled && options.despill > 0
         ? applyDespill(pixel, options.sample.rgb, opacity, options.despill * edgeWeight)
         : pixel;
-    const alpha = Math.round(opacity * 255);
+    const alpha = Math.round((sourceAlpha * opacity));
 
     outputPixels[index] = adjustedPixel.r;
     outputPixels[index + 1] = adjustedPixel.g;
@@ -240,11 +282,50 @@ export function applyColorKey(
   };
 }
 
+export function applyColorKeySequence(
+  source: HTMLCanvasElement,
+  optionsList: ColorKeyOptions[],
+): {
+  image: HTMLCanvasElement;
+  mask: HTMLCanvasElement;
+} {
+  if (!optionsList.length) {
+    return {
+      image: cloneCanvas(source),
+      mask: createMaskFromAlpha(source),
+    };
+  }
+
+  let current = source;
+  let latest = applyColorKey(current, optionsList[0]);
+  current = latest.image;
+
+  for (let index = 1; index < optionsList.length; index += 1) {
+    latest = applyColorKey(current, optionsList[index]);
+    current = latest.image;
+  }
+
+  return latest;
+}
+
 export function processExtractedFrame(
   frame: ExtractedFrame,
   options: ColorKeyOptions,
 ): ProcessedFrame {
   const processed = applyColorKey(frame.image, options);
+
+  return {
+    ...frame,
+    processedImage: processed.image,
+    maskImage: processed.mask,
+  };
+}
+
+export function processExtractedFrameWithSequence(
+  frame: ExtractedFrame,
+  optionsList: ColorKeyOptions[],
+): ProcessedFrame {
+  const processed = applyColorKeySequence(frame.image, optionsList);
 
   return {
     ...frame,

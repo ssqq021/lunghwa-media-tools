@@ -5,28 +5,35 @@
   "license": "GPL-3.0-only",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "tsc -b && vite build",
-    "preview": "vite preview",
-    "test": "vitest run"
+    "dev": "vinext dev",
+    "build": "vinext build",
+    "preview": "vinext start",
+    "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
     "jszip": "^3.10.1",
+    "next": "16.2.6",
     "pica": "^9.0.1",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
+    "react": "19.2.6",
+    "react-dom": "19.2.6",
     "upng-js": "^2.1.0"
   },
   "devDependencies": {
+    "@cloudflare/vite-plugin": "1.37.1",
     "@testing-library/jest-dom": "^6.6.3",
     "@testing-library/react": "^16.2.0",
     "@testing-library/user-event": "^14.6.1",
-    "@types/react": "^18.3.12",
-    "@types/react-dom": "^18.3.1",
-    "@vitejs/plugin-react": "^4.3.4",
+    "@types/node": "22.19.19",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "@vitejs/plugin-react": "6.0.2",
+    "@vitejs/plugin-rsc": "0.5.26",
     "jsdom": "^25.0.1",
+    "react-server-dom-webpack": "19.2.6",
     "typescript": "^5.6.3",
-    "vite": "^5.4.10",
-    "vitest": "^2.1.4"
+    "vinext": "0.0.50",
+    "vite": "8.0.13",
+    "vitest": "4.1.10",
+    "wrangler": "4.92.0"
   }
 }

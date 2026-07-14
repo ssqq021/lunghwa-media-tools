@@ -1,6 +1,9 @@
+'use client';
+
 import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import type {
   CropArea,
+  CropBounds,
   ColorKeyOptions,
   ColorSample,
   ExtractedFrame,
@@ -15,7 +18,8 @@ import type {
 } from './types';
 import {
   applyColorKey,
-  processExtractedFrame,
+  applyColorKeySequence,
+  processExtractedFrameWithSequence,
   sampleCanvasColor,
 } from './lib/chromaKey';
 import {
@@ -36,6 +40,16 @@ import {
   renderFrameSheet,
 } from './lib/sheet';
 import { formatTimestamp } from './lib/time';
+import { adjustPreviewZoom, MAX_PREVIEW_ZOOM, MIN_PREVIEW_ZOOM } from './lib/previewZoom';
+import {
+  createFrameSelection,
+  createIntervalFrameSelection,
+  filterAssetsBySelection,
+  getFrameSelectionSignature,
+  getSelectedFrameCount,
+  normalizeFrameSelection,
+  type FrameSelection,
+} from './lib/frameSelection';
 import {
   cropCanvas,
   createVideoFrameReader,
@@ -47,6 +61,12 @@ import {
   revokeVideoAsset,
   type VideoFrameReader,
 } from './lib/video';
+import {
+  assignWatermarkPassesToFrames,
+  getNearestFrameTime,
+  removeWatermarkFromCanvas,
+  type WatermarkPass,
+} from './lib/watermark';
 import ImageCutoutTool from './ImageCutoutTool';
 import ImageResizeTool from './ImageResizeTool';
 import ImageCompressTool from './ImageCompressTool';
@@ -66,8 +86,6 @@ const DEFAULT_CROP_TOP_PERCENT = 0;
 const DEFAULT_CROP_WIDTH_PERCENT = 100;
 const DEFAULT_CROP_HEIGHT_PERCENT = 100;
 const MAX_EXTRACTED_FRAMES = 180;
-const BRAND_ASSET_PATH = `${import.meta.env.BASE_URL}logo.jpg`;
-const GAME_SFX_LAB_URL = 'https://mowangblog.github.io/game-sfx-generator-web/';
 const EXPORT_PRESETS = [
   { value: 'original', label: '原始比例', frameSize: undefined },
   { value: '32', label: '32 × 32', frameSize: 32 },
@@ -75,24 +93,6 @@ const EXPORT_PRESETS = [
   { value: '128', label: '128 × 128', frameSize: 128 },
   { value: '256', label: '256 × 256', frameSize: 256 },
 ] as const;
-const SUPPORT_LINKS = [
-  {
-    id: 'bilibili',
-    label: 'B站',
-    href: 'https://space.bilibili.com/13406042',
-  },
-  {
-    id: 'douyin',
-    label: '抖音',
-    href: 'https://www.douyin.com/user/MS4wLjABAAAAycVZEUWkD8Jwx8_Mu5E4TVdR8MkFlX0xNtEhEq5mOQKHeG9m3bDt-Q_PVGkQuDAA',
-  },
-  {
-    id: 'xiaohongshu',
-    label: '小红书',
-    href: 'https://www.xiaohongshu.com/user/profile/5f7310700000000001002626',
-  },
-] as const;
-
 type SamplePoint = {
   x: number;
   y: number;
@@ -111,7 +111,6 @@ type SheetPreviewResult = {
 type ResultPreviewMode = 'sheet' | 'animation';
 type SpinePreviewMode = 'animation';
 
-type SupportPlatform = (typeof SUPPORT_LINKS)[number]['id'];
 type ExportPresetValue = (typeof EXPORT_PRESETS)[number]['value'];
 type AppMode = 'sheet' | 'cutout' | 'resize' | 'compress';
 
@@ -228,6 +227,25 @@ function getCropAreaFromSelection(
   });
 }
 
+function getPixelBoundsFromSelection(
+  start: SamplePoint,
+  end: SamplePoint,
+  sourceWidth: number,
+  sourceHeight: number,
+): CropBounds {
+  const left = Math.max(0, Math.min(start.x, end.x));
+  const top = Math.max(0, Math.min(start.y, end.y));
+  const right = Math.min(sourceWidth, Math.max(start.x, end.x));
+  const bottom = Math.min(sourceHeight, Math.max(start.y, end.y));
+
+  return {
+    x: left,
+    y: top,
+    width: Math.max(1, right - left),
+    height: Math.max(1, bottom - top),
+  };
+}
+
 function drawCropSelectionCanvas(
   target: HTMLCanvasElement | null,
   source: HTMLCanvasElement | null,
@@ -279,6 +297,40 @@ function drawCropSelectionCanvas(
   context.restore();
 }
 
+function drawWatermarkSelectionCanvas(
+  target: HTMLCanvasElement | null,
+  source: HTMLCanvasElement | null,
+  rect?: CropBounds | null,
+): void {
+  if (!target || !source) {
+    return;
+  }
+
+  target.width = source.width;
+  target.height = source.height;
+
+  const context = target.getContext('2d');
+  if (!context) {
+    return;
+  }
+
+  context.clearRect(0, 0, target.width, target.height);
+  context.drawImage(source, 0, 0);
+
+  if (!rect) {
+    return;
+  }
+
+  context.save();
+  context.fillStyle = 'rgba(239, 68, 68, 0.18)';
+  context.fillRect(rect.x, rect.y, rect.width, rect.height);
+  context.strokeStyle = '#ef4444';
+  context.lineWidth = Math.max(2, source.width / 240);
+  context.setLineDash([10, 8]);
+  context.strokeRect(rect.x, rect.y, rect.width, rect.height);
+  context.restore();
+}
+
 function toTransparentSheetFrames(processedFrames: ProcessedFrame[]): ExtractedFrame[] {
   return processedFrames.map(({ processedImage, ...frame }) => ({
     ...frame,
@@ -306,52 +358,7 @@ function buildSpineDraftFromAssets(
   };
 }
 
-function SupportLogo({ platform }: { platform: SupportPlatform }) {
-  if (platform === 'bilibili') {
-    return (
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <rect x="4.5" y="7" width="15" height="10.5" rx="2.8" fill="none" stroke="currentColor" strokeWidth="1.9" />
-        <path d="M8.4 4.5 6.8 6.7M15.6 4.5l1.6 2.2" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
-        <path d="M9.2 11.1v2.2M14.8 11.1v2.2" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
-        <path d="M8.5 15.3c1.1.7 2.2 1 3.5 1 1.3 0 2.4-.3 3.5-1" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-      </svg>
-    );
-  }
-
-  if (platform === 'douyin') {
-    return (
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path
-          d="M13.2 4.5c1.2 1.8 2.6 3 4.6 3.6v2.6c-1.5-.1-2.9-.6-4-1.4v5.5a4.7 4.7 0 1 1-4.7-4.6c.4 0 .8 0 1.2.1v2.8a2 2 0 1 0 .8 1.7V4.5h2.1Z"
-          fill="currentColor"
-        />
-        <path
-          d="M11.7 4.5v10.3a2 2 0 1 1-2-2c.2 0 .5 0 .7.1v-2.8a4.8 4.8 0 1 0 4.1 4.7V9.3c1.1.8 2.5 1.3 4 1.4V8.1c-2-.6-3.4-1.8-4.6-3.6h-2.2Z"
-          fill="#25F4EE"
-          opacity="0.9"
-        />
-        <path
-          d="M12.5 4.1c1.2 1.8 2.6 3 4.6 3.6v2.6c-1.5-.1-2.9-.6-4-1.4v5.5a4.7 4.7 0 1 1-4.7-4.6c.4 0 .8 0 1.2.1v2.8a2 2 0 1 0 .8 1.7V4.1h2.1Z"
-          fill="#FE2C55"
-          opacity="0.88"
-        />
-      </svg>
-    );
-  }
-
-  return (
-    <svg viewBox="0 0 24 24" aria-hidden="true">
-      <rect x="3.5" y="5" width="17" height="14" rx="4.2" fill="currentColor" />
-      <path
-        d="M8 9.1h3.1v1.4H9.7v.8h1.2c1.5 0 2.4.8 2.4 2.1 0 1.4-1 2.3-2.6 2.3H8v-1.4h2.4c.7 0 1.1-.3 1.1-.8s-.4-.8-1.1-.8H8V9.1Zm6.6 0h1.5l-1.4 2.7 1.5 3.9h-1.6l-.8-2.2-.8 2.2h-1.5l1.5-3.9-1.4-2.7h1.5l.7 1.7.8-1.7Z"
-        fill="#fff"
-      />
-    </svg>
-  );
-}
-
 function App() {
-  const currentYear = new Date().getFullYear();
   const [appMode, setAppMode] = useState<AppMode>('sheet');
   const [videoMeta, setVideoMeta] = useState<VideoMeta | null>(null);
   const [videoUrl, setVideoUrl] = useState<string | null>(null);
@@ -369,6 +376,7 @@ function App() {
   const [referenceTime, setReferenceTime] = useState(0);
   const [referenceRawFrame, setReferenceRawFrame] = useState<HTMLCanvasElement | null>(null);
   const [referenceFrame, setReferenceFrame] = useState<HTMLCanvasElement | null>(null);
+  const [referenceCommittedFrame, setReferenceCommittedFrame] = useState<HTMLCanvasElement | null>(null);
   const [referenceResultFrame, setReferenceResultFrame] = useState<HTMLCanvasElement | null>(null);
   const [referenceMaskFrame, setReferenceMaskFrame] = useState<HTMLCanvasElement | null>(null);
   const [cropLeftPercent, setCropLeftPercent] = useState(DEFAULT_CROP_LEFT_PERCENT);
@@ -376,8 +384,13 @@ function App() {
   const [cropWidthPercent, setCropWidthPercent] = useState(DEFAULT_CROP_WIDTH_PERCENT);
   const [cropHeightPercent, setCropHeightPercent] = useState(DEFAULT_CROP_HEIGHT_PERCENT);
   const [dragSelection, setDragSelection] = useState<DragSelection | null>(null);
+  const [watermarkDragSelection, setWatermarkDragSelection] = useState<DragSelection | null>(null);
+  const [watermarkRect, setWatermarkRect] = useState<CropBounds | null>(null);
+  const [watermarkPasses, setWatermarkPasses] = useState<WatermarkPass[]>([]);
+  const [frameSelection, setFrameSelection] = useState<FrameSelection | null>(null);
   const [samplePoint, setSamplePoint] = useState<SamplePoint | null>(null);
   const [colorSample, setColorSample] = useState<ColorSample | null>(null);
+  const [committedColorKeys, setCommittedColorKeys] = useState<ColorKeyOptions[]>([]);
   const [previewMode, setPreviewMode] = useState<PreviewMode>('result');
   const [solidPreviewColor, setSolidPreviewColor] = useState(DEFAULT_SOLID_PREVIEW_BG);
   const [result, setResult] = useState<RenderResult | null>(null);
@@ -396,6 +409,7 @@ function App() {
   const [spineAnimationFrameIndex, setSpineAnimationFrameIndex] = useState(0);
   const [animationPlaying, setAnimationPlaying] = useState(true);
   const [animationFrameIndex, setAnimationFrameIndex] = useState(0);
+  const [animationZoom, setAnimationZoom] = useState(100);
   const [status, setStatus] = useState('请选择一个本地视频开始生成。');
   const [isDragging, setIsDragging] = useState(false);
   const [isRendering, setIsRendering] = useState(false);
@@ -410,7 +424,10 @@ function App() {
   const cropPreviewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const referenceCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const watermarkCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const watermarkVideoRef = useRef<HTMLVideoElement | null>(null);
   const resultAnimationCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const resultAnimationPreviewRef = useRef<HTMLDivElement | null>(null);
   const spineAnimationCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const controlsPanelRef = useRef<HTMLDivElement | null>(null);
   const cropPanelRef = useRef<HTMLElement | null>(null);
@@ -430,6 +447,7 @@ function App() {
   const pendingSpineScrollRef = useRef(false);
   const pendingSpineScrollTopRef = useRef<number | null>(null);
   const hasInitializedInvalidationRef = useRef(false);
+  const hasInitializedAssetInvalidationRef = useRef(false);
   const latestVideoUrlRef = useRef<string | null>(null);
   const latestResultRef = useRef<RenderResult | null>(null);
 
@@ -571,6 +589,73 @@ function App() {
       }),
     [sheetOptions.columns, sheetOptions.frameSize, sheetOptions.gap],
   );
+  const normalizedFrameSelection = useMemo(
+    () => normalizeFrameSelection(frameSelection, extractedFrames?.length ?? 0),
+    [extractedFrames?.length, frameSelection],
+  );
+  const frameSelectionSignature = useMemo(
+    () => getFrameSelectionSignature(normalizedFrameSelection, extractedFrames?.length ?? 0),
+    [extractedFrames?.length, normalizedFrameSelection],
+  );
+  const selectedFrameCount = useMemo(
+    () => getSelectedFrameCount(normalizedFrameSelection, extractedFrames?.length ?? 0),
+    [extractedFrames?.length, normalizedFrameSelection],
+  );
+  const filteredAssets = useMemo<GeneratedAssets | null>(() => {
+    if (!extractedFrames) {
+      return null;
+    }
+
+    return filterAssetsBySelection(
+      {
+        frames: extractedFrames,
+        processed: processedFrames,
+      },
+      normalizedFrameSelection,
+    );
+  }, [extractedFrames, normalizedFrameSelection, processedFrames]);
+  const frameThumbnailUrls = useMemo(
+    () => extractedFrames?.map((frame) => frame.image.toDataURL('image/png')) ?? [],
+    [extractedFrames],
+  );
+  const watermarkAssignments = useMemo(
+    () => assignWatermarkPassesToFrames(sampleTimes, watermarkPasses),
+    [sampleTimes, watermarkPasses],
+  );
+  const currentWatermarkRects = useMemo(() => {
+    const frameTime = getNearestFrameTime(sampleTimes, referenceTime);
+    if (frameTime === null) {
+      return [];
+    }
+
+    return watermarkAssignments[sampleTimes.indexOf(frameTime)] ?? [];
+  }, [referenceTime, sampleTimes, watermarkAssignments]);
+  const referenceFrameAfterWatermark = useMemo(() => {
+    if (!referenceFrame) {
+      return null;
+    }
+
+    return currentWatermarkRects.reduce(
+      (current, rect) => removeWatermarkFromCanvas(current, rect),
+      referenceFrame,
+    );
+  }, [currentWatermarkRects, referenceFrame]);
+  const activeWatermarkRect = useMemo<CropBounds | null>(
+    () =>
+      watermarkDragSelection && referenceFrame
+        ? getPixelBoundsFromSelection(
+            watermarkDragSelection.start,
+            watermarkDragSelection.current,
+            referenceFrame.width,
+            referenceFrame.height,
+          )
+        : watermarkRect,
+    [referenceFrame, watermarkDragSelection, watermarkRect],
+  );
+  const framePreviewRefreshKey = useMemo(
+    () => `${sheetPreviewConfigKey}|${frameSelectionSignature}`,
+    [frameSelectionSignature, sheetPreviewConfigKey],
+  );
 
   const colorKeyOptions = useMemo<ColorKeyOptions | null>(() => {
     if (!colorSample) {
@@ -595,6 +680,28 @@ function App() {
     softness,
     tolerance,
   ]);
+  const activeColorKeySequence = useMemo<ColorKeyOptions[]>(
+    () => (colorKeyOptions ? [...committedColorKeys, colorKeyOptions] : committedColorKeys),
+    [colorKeyOptions, committedColorKeys],
+  );
+  const committedColorKeySignature = useMemo(
+    () =>
+      JSON.stringify(
+        committedColorKeys.map((item) => ({
+          sample: item.sample.hex,
+          tolerance: item.tolerance,
+          softness: item.softness,
+          despill: item.despill,
+          edgeRadius: item.edgeRadius,
+          smoothing: item.smoothing,
+          despillEnabled: item.despillEnabled,
+          algorithm: item.algorithm,
+        })),
+      ),
+    [committedColorKeys],
+  );
+  const hasCommittedColorKeys = committedColorKeys.length > 0;
+  const hasAnyColorKeyPass = activeColorKeySequence.length > 0;
 
   const isCutoutMode = appMode === 'cutout';
   const isResizeMode = appMode === 'resize';
@@ -608,15 +715,16 @@ function App() {
       !frameLimitExceeded,
   );
   const showChromaStage = Boolean(videoMeta && isChromaStageOpen);
+  const showFramePickerStage = Boolean(!isCutoutMode && extractedFrames?.length);
   const showResultStage = Boolean(result);
   const showSpineStage = Boolean(!isCutoutMode && spineDraft);
   const animationFrames = useMemo<ExtractedFrame[]>(() => {
-    if (processedFrames) {
-      return toTransparentSheetFrames(processedFrames);
+    if (filteredAssets?.processed) {
+      return toTransparentSheetFrames(filteredAssets.processed);
     }
 
-    return extractedFrames ?? [];
-  }, [extractedFrames, processedFrames]);
+    return filteredAssets?.frames ?? [];
+  }, [filteredAssets]);
   const spineFrames = useMemo<ExtractedFrame[]>(() => spineDraft?.frames ?? [], [spineDraft]);
 
   function scrollToStep(target: { current: HTMLElement | null }): void {
@@ -644,17 +752,16 @@ function App() {
     readerRef.current = null;
   }
 
-  function clearGeneratedAssets(nextStatus?: string): void {
+  function clearDerivedOutputs(nextStatus?: string): void {
     pendingResultScrollRef.current = false;
     pendingResultScrollTopRef.current = null;
     pendingSpineScrollRef.current = false;
     pendingSpineScrollTopRef.current = null;
-    setExtractedFrames(null);
-    setProcessedFrames(null);
     replacePreviewResult(null);
     setResultPreviewMode('sheet');
     setAnimationFrameIndex(0);
     setAnimationPlaying(true);
+    setAnimationZoom(100);
     setSpineDraft(null);
     setSpineAnimationFrameIndex(0);
     setSpineAnimationPlaying(true);
@@ -668,6 +775,12 @@ function App() {
     if (nextStatus) {
       setStatus(nextStatus);
     }
+  }
+
+  function clearGeneratedAssets(nextStatus?: string): void {
+    setExtractedFrames(null);
+    setProcessedFrames(null);
+    clearDerivedOutputs(nextStatus);
   }
 
   useEffect(() => {
@@ -824,6 +937,7 @@ function App() {
   useEffect(() => {
     if (!referenceRawFrame) {
       setReferenceFrame(null);
+      setReferenceCommittedFrame(null);
       return;
     }
 
@@ -872,45 +986,53 @@ function App() {
   ]);
 
   useEffect(() => {
-    if (!referenceFrame || !samplePoint) {
+    if (!referenceCommittedFrame || !samplePoint) {
       setColorSample(null);
       return;
     }
 
     try {
       setColorSample(
-        sampleCanvasColor(referenceFrame, samplePoint.x, samplePoint.y, DEFAULT_SAMPLE_RADIUS),
+        sampleCanvasColor(referenceCommittedFrame, samplePoint.x, samplePoint.y, DEFAULT_SAMPLE_RADIUS),
       );
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : '颜色取样失败。');
     }
-  }, [referenceFrame, samplePoint]);
+  }, [referenceCommittedFrame, samplePoint]);
 
   useEffect(() => {
-    if (!referenceFrame) {
+    if (!referenceFrameAfterWatermark) {
+      setReferenceCommittedFrame(null);
       setReferenceResultFrame(null);
       setReferenceMaskFrame(null);
       return;
     }
 
-    if (!colorKeyOptions) {
-      setReferenceResultFrame(referenceFrame);
-      setReferenceMaskFrame(null);
-      return;
-    }
-
     try {
-      const preview = applyColorKey(referenceFrame, colorKeyOptions);
+      const committedPreview = hasCommittedColorKeys
+        ? applyColorKeySequence(referenceFrameAfterWatermark, committedColorKeys)
+        : null;
+      const committedFrame = committedPreview?.image ?? referenceFrameAfterWatermark;
+
+      setReferenceCommittedFrame(committedFrame);
+
+      if (!colorKeyOptions) {
+        setReferenceResultFrame(committedFrame);
+        setReferenceMaskFrame(committedPreview?.mask ?? null);
+        return;
+      }
+
+      const preview = applyColorKey(committedFrame, colorKeyOptions);
       setReferenceResultFrame(preview.image);
       setReferenceMaskFrame(preview.mask);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : '参考帧预览失败。');
     }
-  }, [colorKeyOptions, referenceFrame]);
+  }, [colorKeyOptions, committedColorKeys, hasCommittedColorKeys, referenceFrameAfterWatermark]);
 
   useEffect(() => {
-    drawCanvas(referenceCanvasRef.current, referenceFrame, samplePoint);
-  }, [referenceFrame, samplePoint]);
+    drawCanvas(referenceCanvasRef.current, referenceCommittedFrame, samplePoint);
+  }, [referenceCommittedFrame, samplePoint]);
 
   useEffect(() => {
     drawCropSelectionCanvas(cropSelectionCanvasRef.current, referenceRawFrame, activeCropArea);
@@ -926,6 +1048,14 @@ function App() {
       cropCanvas(referenceRawFrame, activeCropArea),
     );
   }, [activeCropArea, referenceRawFrame]);
+
+  useEffect(() => {
+    drawWatermarkSelectionCanvas(
+      watermarkCanvasRef.current,
+      referenceFrameAfterWatermark,
+      activeWatermarkRect,
+    );
+  }, [activeWatermarkRect, referenceFrameAfterWatermark]);
 
   useEffect(() => {
     const source =
@@ -1076,7 +1206,21 @@ function App() {
     }
 
     drawCanvas(resultAnimationCanvasRef.current, frame.image);
-  }, [animationFrameIndex, animationFrames]);
+  }, [animationFrameIndex, animationFrames, resultPreviewMode]);
+
+  useEffect(() => {
+    const preview = resultAnimationPreviewRef.current;
+    if (!preview || resultPreviewMode !== 'animation') {
+      return;
+    }
+
+    const handleWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      setAnimationZoom((current) => adjustPreviewZoom(current, event.deltaY < 0 ? 1 : -1));
+    };
+    preview.addEventListener('wheel', handleWheel, { passive: false });
+    return () => preview.removeEventListener('wheel', handleWheel);
+  }, [result, resultPreviewMode]);
 
   useEffect(() => {
     if (
@@ -1133,7 +1277,7 @@ function App() {
       return;
     }
 
-    if (lastSheetPreviewConfigRef.current === null || lastSheetPreviewConfigRef.current === sheetPreviewConfigKey) {
+    if (lastSheetPreviewConfigRef.current === null || lastSheetPreviewConfigRef.current === framePreviewRefreshKey) {
       return;
     }
 
@@ -1162,7 +1306,7 @@ function App() {
         autoPreviewTimerRef.current = null;
       }
     };
-  }, [sheetPreviewConfigKey, showResultStage]);
+  }, [framePreviewRefreshKey, showResultStage]);
 
   useEffect(() => {
     if (!hasInitializedInvalidationRef.current) {
@@ -1177,19 +1321,46 @@ function App() {
     clearGeneratedAssets('参数已更新，请重新生成最新结果。');
   }, [
     colorSample?.hex,
+    committedColorKeySignature,
+    despillEnabled,
+    samplePoint?.x,
+    samplePoint?.y,
+    smoothing,
+    softness,
+    tolerance,
+  ]);
+
+  useEffect(() => {
+    if (!hasInitializedAssetInvalidationRef.current) {
+      hasInitializedAssetInvalidationRef.current = true;
+      return;
+    }
+
+    if (!extractedFrames && !processedFrames && !result) {
+      return;
+    }
+
+    setFrameSelection(null);
+    clearGeneratedAssets('视频片段或裁剪范围已更新，请重新抽帧并生成最新结果。');
+  }, [
+    framesPerSecond,
+    segmentEnd,
+    segmentStart,
+  ]);
+
+  useEffect(() => {
+    setWatermarkRect(null);
+    setWatermarkDragSelection(null);
+    setWatermarkPasses([]);
+    if (extractedFrames || processedFrames || result) {
+      setFrameSelection(null);
+      clearGeneratedAssets('裁剪范围或视频已更新，请重新设置去水印区域并抽帧。');
+    }
+  }, [
     cropArea.heightPercent,
     cropArea.leftPercent,
     cropArea.topPercent,
     cropArea.widthPercent,
-    despillEnabled,
-    framesPerSecond,
-    samplePoint?.x,
-    samplePoint?.y,
-    segmentEnd,
-    segmentStart,
-    smoothing,
-    softness,
-    tolerance,
     videoUrl,
   ]);
 
@@ -1200,6 +1371,7 @@ function App() {
     disposeReferenceReader();
     setReferenceRawFrame(null);
     setReferenceFrame(null);
+    setReferenceCommittedFrame(null);
     setReferenceResultFrame(null);
     setReferenceMaskFrame(null);
     setCropLeftPercent(DEFAULT_CROP_LEFT_PERCENT);
@@ -1208,6 +1380,11 @@ function App() {
     setCropHeightPercent(DEFAULT_CROP_HEIGHT_PERCENT);
     setSamplePoint(null);
     setColorSample(null);
+    setCommittedColorKeys([]);
+    setFrameSelection(null);
+    setWatermarkRect(null);
+    setWatermarkDragSelection(null);
+    setWatermarkPasses([]);
     setIsChromaStageOpen(false);
     pendingChromaScrollRef.current = false;
     pendingChromaScrollTopRef.current = null;
@@ -1246,6 +1423,52 @@ function App() {
     void updateFile(file);
   }
 
+  async function applyWatermarkToFrames(
+    frames: ExtractedFrame[],
+    passes: WatermarkPass[],
+  ): Promise<ExtractedFrame[]> {
+    if (!passes.length) {
+      return frames;
+    }
+
+    const assignments = assignWatermarkPassesToFrames(
+      frames.map((frame) => frame.time),
+      passes,
+    );
+    const nextFrames: ExtractedFrame[] = [];
+
+    for (const [index, frame] of frames.entries()) {
+      const rects = assignments[index];
+      if (!rects.length) {
+        nextFrames.push(frame);
+        continue;
+      }
+
+      setStatus(`正在执行第 ${index + 1} 帧去水印...`);
+      nextFrames.push({
+        ...frame,
+        image: rects.reduce(
+          (current, rect) => removeWatermarkFromCanvas(current, rect),
+          frame.image,
+        ),
+      });
+      if (index < frames.length - 1) {
+        await nextFrame();
+      }
+    }
+
+    return nextFrames;
+  }
+
+  function getSelectedAssetsOrThrow(assets: GeneratedAssets): GeneratedAssets {
+    const nextAssets = filterAssetsBySelection(assets, normalizedFrameSelection);
+    if (!nextAssets.frames.length) {
+      throw new Error('请至少保留 1 帧后再生成或导出。');
+    }
+
+    return nextAssets;
+  }
+
   async function generateAssets(): Promise<GeneratedAssets> {
     if (!videoMeta || !videoUrl) {
       throw new Error('请先上传一个视频文件。');
@@ -1273,32 +1496,38 @@ function App() {
           setStatus(`正在抽取序列帧 ${current}/${total}...`);
         },
       );
+      const framesWithWatermarkHandled = await applyWatermarkToFrames(frames, watermarkPasses);
+      setFrameSelection((current) =>
+        current
+          ? normalizeFrameSelection(current, framesWithWatermarkHandled.length)
+          : createFrameSelection(framesWithWatermarkHandled.length),
+      );
 
-      if (!colorKeyOptions) {
-        setExtractedFrames(frames);
+      if (!activeColorKeySequence.length) {
+        setExtractedFrames(framesWithWatermarkHandled);
         setProcessedFrames(null);
 
         return {
-          frames,
+          frames: framesWithWatermarkHandled,
           processed: null,
         };
       }
 
       const nextProcessedFrames: ProcessedFrame[] = [];
 
-      for (const [index, frame] of frames.entries()) {
-        setStatus(`正在执行 ChromaKey 抠像 ${index + 1}/${frames.length}...`);
-        nextProcessedFrames.push(processExtractedFrame(frame, colorKeyOptions));
-        if (index < frames.length - 1) {
+      for (const [index, frame] of framesWithWatermarkHandled.entries()) {
+        setStatus(`正在执行 ChromaKey 抠像 ${index + 1}/${framesWithWatermarkHandled.length}...`);
+        nextProcessedFrames.push(processExtractedFrameWithSequence(frame, activeColorKeySequence));
+        if (index < framesWithWatermarkHandled.length - 1) {
           await nextFrame();
         }
       }
 
-      setExtractedFrames(frames);
+      setExtractedFrames(framesWithWatermarkHandled);
       setProcessedFrames(nextProcessedFrames);
 
       return {
-        frames,
+        frames: framesWithWatermarkHandled,
         processed: nextProcessedFrames,
       };
     } finally {
@@ -1322,7 +1551,7 @@ function App() {
       throw new Error('请先上传视频。');
     }
 
-    const currentAssets = assets ?? (await ensureAssets());
+    const currentAssets = getSelectedAssetsOrThrow(assets ?? (await ensureAssets()));
     const transparent = Boolean(currentAssets.processed);
     const framesForRender = currentAssets.processed
       ? toTransparentSheetFrames(currentAssets.processed)
@@ -1338,7 +1567,7 @@ function App() {
     );
 
     replacePreviewResult(renderResult, transparent);
-    lastSheetPreviewConfigRef.current = sheetPreviewConfigKey;
+    lastSheetPreviewConfigRef.current = framePreviewRefreshKey;
     setStatus(transparent ? '透明序列图已生成，可以继续预览或下载。' : '普通序列图已生成，可以继续预览或下载。');
 
     return {
@@ -1349,13 +1578,11 @@ function App() {
 
   async function handleGeneratePreview(): Promise<void> {
     try {
-      pendingResultScrollTopRef.current = window.scrollY;
-      pendingResultScrollRef.current = true;
-      const assets = await ensureAssets();
+      const assets = await generateAssets();
       await renderSheetPreview(assets);
+      setResultPreviewMode('animation');
+      scrollToStep(resultPanelRef);
     } catch (nextError) {
-      pendingResultScrollRef.current = false;
-      pendingResultScrollTopRef.current = null;
       setError(nextError instanceof Error ? nextError.message : '生成失败。');
       setStatus('生成失败，请调整参数后重试。');
     }
@@ -1376,7 +1603,7 @@ function App() {
 
   async function handleDownloadZip(): Promise<void> {
     try {
-      const assets = await ensureAssets();
+      const assets = getSelectedAssetsOrThrow(await ensureAssets());
       if (!assets.processed) {
         throw new Error('透明帧 ZIP 需要先启用背景扣像并完成取色。');
       }
@@ -1397,7 +1624,7 @@ function App() {
 
   async function handleDownloadGif(): Promise<void> {
     try {
-      const assets = await ensureAssets();
+      const assets = getSelectedAssetsOrThrow(await ensureAssets());
       const transparent = Boolean(assets.processed);
       const framesForGif = transparent
         ? toTransparentSheetFrames(assets.processed ?? [])
@@ -1441,7 +1668,7 @@ function App() {
       }
 
       setError(null);
-      const assets = await ensureAssets();
+      const assets = getSelectedAssetsOrThrow(await ensureAssets());
       const nextDraft = buildSpineDraftFromAssets(
         assets,
         baseFileName,
@@ -1613,13 +1840,13 @@ function App() {
   }
 
   function handleReferenceCanvasClick(event: React.MouseEvent<HTMLCanvasElement>): void {
-    if (!referenceFrame || !referenceCanvasRef.current) {
+    if (!referenceCommittedFrame || !referenceCanvasRef.current) {
       return;
     }
 
     const rect = referenceCanvasRef.current.getBoundingClientRect();
-    const ratioX = referenceFrame.width / rect.width;
-    const ratioY = referenceFrame.height / rect.height;
+    const ratioX = referenceCommittedFrame.width / rect.width;
+    const ratioY = referenceCommittedFrame.height / rect.height;
     const x = Math.round((event.clientX - rect.left) * ratioX);
     const y = Math.round((event.clientY - rect.top) * ratioY);
 
@@ -1627,10 +1854,224 @@ function App() {
       x,
       y,
     });
-    setStatus('背景颜色已采样，可以继续调整容差、羽化和去溢色。');
+    setStatus(
+      hasCommittedColorKeys
+        ? '新背景颜色已采样，可以继续调整参数，或先应用当前抠像再继续下一轮。'
+        : '背景颜色已采样，可以继续调整容差、羽化和去溢色。',
+    );
     if (!samplePoint) {
       scrollToStep(chromaActionsRef);
     }
+  }
+
+  function handleCommitCurrentColorKey(): void {
+    if (!colorKeyOptions) {
+      return;
+    }
+
+    const nextCount = committedColorKeys.length + 1;
+    setCommittedColorKeys((current) => [...current, colorKeyOptions]);
+    setSamplePoint(null);
+    setColorSample(null);
+    setPreviewMode('result');
+    setStatus(`已应用第 ${nextCount} 次抠像，可继续点击下一种背景颜色。`);
+  }
+
+  function handleResetCommittedColorKeys(): void {
+    if (!committedColorKeys.length) {
+      return;
+    }
+
+    setCommittedColorKeys([]);
+    setSamplePoint(null);
+    setColorSample(null);
+    setPreviewMode('result');
+    setStatus('已重置为原始参考帧，可重新开始抠像。');
+  }
+
+  function handleFrameSelectionChange(index: number, checked: boolean): void {
+    setFrameSelection((current) => {
+      const base = normalizeFrameSelection(current, extractedFrames?.length ?? 0);
+      if (index < 0 || index >= base.length) {
+        return base;
+      }
+
+      const next = [...base];
+      next[index] = checked;
+      return next;
+    });
+  }
+
+  function handleSelectAllFrames(): void {
+    setFrameSelection(createFrameSelection(extractedFrames?.length ?? 0));
+  }
+
+  function handleInvertFrameSelection(): void {
+    setFrameSelection((current) =>
+      normalizeFrameSelection(current, extractedFrames?.length ?? 0).map((enabled) => !enabled),
+    );
+  }
+
+  function handleIntervalFrameSelection(skippedFrames: number): void {
+    setFrameSelection(
+      createIntervalFrameSelection(extractedFrames?.length ?? 0, skippedFrames),
+    );
+  }
+
+  function handleWatermarkPointerDown(event: React.PointerEvent<HTMLCanvasElement>): void {
+    if (!referenceFrame) {
+      return;
+    }
+
+    watermarkVideoRef.current?.pause();
+    const point = getCanvasPoint(
+      event,
+      event.currentTarget,
+      referenceFrame.width,
+      referenceFrame.height,
+    );
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setWatermarkDragSelection({
+      start: point,
+      current: point,
+    });
+  }
+
+  function handleWatermarkPointerMove(event: React.PointerEvent<HTMLCanvasElement>): void {
+    if (!referenceFrame || !watermarkDragSelection) {
+      return;
+    }
+
+    const point = getCanvasPoint(
+      event,
+      event.currentTarget,
+      referenceFrame.width,
+      referenceFrame.height,
+    );
+    setWatermarkDragSelection((current) =>
+      current
+        ? {
+            ...current,
+            current: point,
+          }
+        : current,
+    );
+  }
+
+  function handleWatermarkPointerUp(event: React.PointerEvent<HTMLCanvasElement>): void {
+    if (!referenceFrame || !watermarkDragSelection) {
+      return;
+    }
+
+    const point = getCanvasPoint(
+      event,
+      event.currentTarget,
+      referenceFrame.width,
+      referenceFrame.height,
+    );
+    const rect = getPixelBoundsFromSelection(
+      watermarkDragSelection.start,
+      point,
+      referenceFrame.width,
+      referenceFrame.height,
+    );
+
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+
+    setWatermarkDragSelection(null);
+    if (rect.width < 4 || rect.height < 4) {
+      setStatus('去水印框选区域过小，请重新拖拽选择。');
+      return;
+    }
+
+    setWatermarkRect(rect);
+    setStatus('去水印区域已选中，可应用到全部帧，或仅对当前帧补漏。');
+  }
+
+  function handleWatermarkPointerCancel(event: React.PointerEvent<HTMLCanvasElement>): void {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+
+    setWatermarkDragSelection(null);
+  }
+
+  function handleClearWatermarkRect(): void {
+    setWatermarkRect(null);
+    setWatermarkDragSelection(null);
+    setStatus('已清除当前框选。');
+  }
+
+  function invalidateAssetsAfterWatermarkChange(nextStatus: string): void {
+    if (extractedFrames || processedFrames || result) {
+      setFrameSelection(null);
+      clearGeneratedAssets(nextStatus);
+      return;
+    }
+
+    setStatus(nextStatus);
+  }
+
+  function handleApplyWatermarkToCurrentFrame(): void {
+    if (!watermarkRect) {
+      setStatus('请先在当前帧上框选水印区域。');
+      return;
+    }
+
+    const frameTime = getNearestFrameTime(sampleTimes, referenceTime);
+    if (frameTime === null) {
+      setStatus('当前片段没有可处理的抽帧时间点。');
+      return;
+    }
+
+    setReferenceTime(frameTime);
+    setWatermarkPasses((current) => [
+      ...current,
+      { scope: 'frame', time: frameTime, rect: watermarkRect },
+    ]);
+    setWatermarkRect(null);
+    setWatermarkDragSelection(null);
+    invalidateAssetsAfterWatermarkChange(
+      `已完成第 ${watermarkPasses.length + 1} 次去水印，仅作用于 ${formatTimestamp(frameTime)} 对应帧。`,
+    );
+  }
+
+  function handleApplyWatermarkToAllFrames(): void {
+    if (!watermarkRect) {
+      setStatus('请先在当前画面上框选水印区域。');
+      return;
+    }
+
+    setWatermarkPasses((current) => [
+      ...current,
+      { scope: 'all', rect: watermarkRect },
+    ]);
+    setWatermarkDragSelection(null);
+    invalidateAssetsAfterWatermarkChange(
+      `已完成第 ${watermarkPasses.length + 1} 次去水印，当前区域将应用到全部抽帧。`,
+    );
+  }
+
+  function handleUndoWatermarkPass(): void {
+    if (!watermarkPasses.length) {
+      return;
+    }
+
+    setWatermarkPasses((current) => current.slice(0, -1));
+    invalidateAssetsAfterWatermarkChange('已撤销上一次去水印操作。');
+  }
+
+  function handleClearWatermarkPasses(): void {
+    if (!watermarkPasses.length) {
+      return;
+    }
+
+    setWatermarkPasses([]);
+    setWatermarkRect(null);
+    setWatermarkDragSelection(null);
+    invalidateAssetsAfterWatermarkChange('已清空步骤4的全部去水印操作。');
   }
 
   function switchAppMode(nextMode: AppMode): void {
@@ -1638,6 +2079,11 @@ function App() {
     setSpineDraft(null);
     setSamplePoint(null);
     setColorSample(null);
+    setCommittedColorKeys([]);
+    setFrameSelection(null);
+    setWatermarkRect(null);
+    setWatermarkDragSelection(null);
+    setWatermarkPasses([]);
     setPreviewMode('result');
 
     if (nextMode === 'cutout') {
@@ -1666,17 +2112,6 @@ function App() {
 
       <main className="app-card">
         <section className="hero">
-          {/* <div className="hero-brand">
-            <img
-              className="hero-brand__avatar"
-              src={BRAND_ASSET_PATH}
-              alt="mowangblog 官方防伪标识"
-            />
-            <div className="hero-brand__info">
-              <p className="eyebrow">今天又被Godot打了</p>
-              
-            </div>
-          </div> */}
           <h1 className="hero-title">
             <span className="hero-title__main">
               {isCutoutMode
@@ -1722,33 +2157,6 @@ function App() {
               >
                 图片压缩工具
               </button>
-              <a
-                className="hero-link"
-                href={GAME_SFX_LAB_URL}
-                target="_blank"
-                rel="noreferrer"
-              >
-                游戏音效生成器
-              </a>
-            </div>
-          </div>
-          <div className="hero-support-row">
-            <p className="hero-copy">永久免费工具，欢迎一键三连➕关注支持更新。</p>
-            <div className="hero-links">
-              {SUPPORT_LINKS.map((link) => (
-                <a
-                  key={link.label}
-                  className={`hero-link hero-link--${link.id}`}
-                  href={link.href}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  <span className="hero-link__icon" aria-hidden="true">
-                    <SupportLogo platform={link.id} />
-                  </span>
-                  {link.label}
-                </a>
-              ))}
             </div>
           </div>
         </section>
@@ -1953,27 +2361,8 @@ function App() {
 
                 <div ref={controlsPanelRef} className="controls-pane">
                   <div className="crop-controls-head">
-                    <strong>3. 提取帧</strong>
-                    <span>先确认片段和每秒帧数，再提取参考帧开始取色。</span>
-                  </div>
-
-                  <div className="control-grid">
-                    <label className="field field-card">
-                      <span>每秒提取帧数</span>
-                      <input
-                        min={1}
-                        max={24}
-                        type="number"
-                        value={framesPerSecond}
-                        onChange={(event) => setFramesPerSecond(Number(event.target.value) || 1)}
-                      />
-                    </label>
-
-                    <div className="option-card option-card--metric">
-                      <span>预计结果</span>
-                      <strong>{estimatedFrameCount} 帧</strong>
-                      <small>{selectedDuration.toFixed(2)} 秒片段</small>
-                    </div>
+                    <strong>3. 视频片段与参考帧</strong>
+                    <span>确认处理片段，再进入去水印和抠像设置。</span>
                   </div>
 
                   <div className="segment-picker">
@@ -1996,6 +2385,8 @@ function App() {
                         onChange={(event) => {
                           const nextStart = Math.min(Number(event.target.value), segmentEnd);
                           setSegmentStart(Number(nextStart.toFixed(3)));
+                          setWatermarkPasses([]);
+                          setWatermarkRect(null);
                         }}
                       />
                       <input
@@ -2009,6 +2400,8 @@ function App() {
                         onChange={(event) => {
                           const nextEnd = Math.max(Number(event.target.value), segmentStart);
                           setSegmentEnd(Number(nextEnd.toFixed(3)));
+                          setWatermarkPasses([]);
+                          setWatermarkRect(null);
                         }}
                       />
                     </div>
@@ -2040,16 +2433,12 @@ function App() {
                         setStatus(
                           isCutoutMode
                             ? '已提取参考帧，请点击背景颜色开始抠图。'
-                            : '已提取片段中的第一张参考帧，可直接生成序列图，或先点背景颜色再做抠图。'
+                            : '参考帧已就绪，请先设置去水印区域，再进行抠像。'
                         );
                       }}
                   >
-                    {isChromaStageOpen ? '重新提取参考帧' : '提取帧'}
+                    {isChromaStageOpen ? '重新确认参考帧' : '确认片段并提取参考帧'}
                   </button>
-
-                  {frameLimitExceeded ? (
-                    <p className="error-text">当前设置预计提取 {estimatedFrameCount} 帧，建议缩短片段或降低每秒帧数。</p>
-                  ) : null}
                   {error ? <p className="error-text">{error}</p> : null}
                 </div>
               </div>
@@ -2058,34 +2447,174 @@ function App() {
         ) : null}
 
         {!isCutoutMode && showChromaStage ? (
-        <section ref={chromaPanelRef} className="panel chroma-panel">
+        <section ref={chromaPanelRef} className="panel frame-picker-panel">
           <div className="panel-head panel-head--stack">
             <div>
-              <h2>4. 参考帧与抠像预览</h2>
-              <span>直接在左侧预览图里点击背景颜色；右侧可切换结果、蒙版和纯色底检查。</span>
+              <h2>4. 去水印</h2>
+              <span>固定水印可作用于全部帧；移动或遗漏水印可暂停后只处理当前帧。</span>
+            </div>
+          </div>
+
+          <div className="reference-toolbar">
+            <label className="range-block">
+              <span>当前检查时间</span>
+              <input
+                max={segmentEnd}
+                min={segmentStart}
+                step={0.01}
+                type="range"
+                value={referenceTime}
+                onChange={(event) => setReferenceTime(Number(event.target.value))}
+              />
+            </label>
+
+            <div className="reference-meta">
+              <strong>{videoMeta ? formatTimestamp(referenceTime) : '00:00.000'}</strong>
+              <span>{isReferenceLoading ? '正在更新当前帧...' : '播放右侧视频或拖动时间轴，找到出现水印的帧'}</span>
+            </div>
+          </div>
+
+          <div className="reference-grid">
+            <div className="canvas-card">
+              <div className="canvas-head">
+                <div className="canvas-title">
+                  <span>去水印区域</span>
+                  <small>{watermarkRect ? '已框选，请选择应用到全部帧或仅当前帧' : `当前帧累计应用 ${currentWatermarkRects.length} 个区域`}</small>
+                </div>
+              </div>
+              <div className="canvas-surface checkerboard">
+                <canvas
+                  ref={watermarkCanvasRef}
+                  className="preview-canvas"
+                  onPointerCancel={handleWatermarkPointerCancel}
+                  onPointerDown={handleWatermarkPointerDown}
+                  onPointerMove={handleWatermarkPointerMove}
+                  onPointerUp={handleWatermarkPointerUp}
+                />
+              </div>
+              <div className="canvas-footer">
+                <span>
+                  {watermarkRect
+                    ? `区域：x=${watermarkRect.x}, y=${watermarkRect.y}, 宽=${watermarkRect.width}, 高=${watermarkRect.height}`
+                    : `当前帧：${formatTimestamp(getNearestFrameTime(sampleTimes, referenceTime) ?? referenceTime)}`}
+                </span>
+              </div>
+            </div>
+
+            <div className="canvas-card">
+              <div className="canvas-head">
+                <div className="canvas-title">
+                  <span>水印动画预览</span>
+                  <small>水印不在每一帧出现时，先播放并暂停到目标画面</small>
+                </div>
+              </div>
+              <div className="canvas-surface">
+                <video
+                  ref={watermarkVideoRef}
+                  className="upload-video-preview"
+                  controls
+                  muted
+                  playsInline
+                  src={videoUrl ?? undefined}
+                  onPlay={(event) => {
+                    if (event.currentTarget.currentTime < segmentStart || event.currentTarget.currentTime >= segmentEnd) {
+                      event.currentTarget.currentTime = segmentStart;
+                    }
+                  }}
+                  onTimeUpdate={(event) => {
+                    const time = event.currentTarget.currentTime;
+                    if (time >= segmentEnd) {
+                      event.currentTarget.pause();
+                      event.currentTarget.currentTime = segmentStart;
+                      setReferenceTime(segmentStart);
+                      return;
+                    }
+
+                    if (time >= segmentStart) {
+                      setReferenceTime(Number(time.toFixed(3)));
+                    }
+                  }}
+                />
+              </div>
+              <div className="canvas-footer">
+                <span>播放范围：{formatTimestamp(segmentStart)} - {formatTimestamp(segmentEnd)}</span>
+              </div>
+            </div>
+          </div>
+
+          <div className="watermark-toolbar">
+            <div className="watermark-toolbar__copy">
+              <strong>
+                已执行 {watermarkPasses.length} 次去水印 · 全部帧 {watermarkPasses.filter((pass) => pass.scope === 'all').length} 次 · 当前帧 {watermarkPasses.filter((pass) => pass.scope === 'frame').length} 次
+              </strong>
+              <span>优先对全部帧处理固定水印；仅在遗漏画面上使用当前帧补漏。</span>
+            </div>
+            <div className="watermark-toolbar__actions">
+              <button
+                className="primary-button"
+                disabled={isRendering || !watermarkRect}
+                type="button"
+                onClick={handleApplyWatermarkToAllFrames}
+              >
+                对全部帧执行去水印
+              </button>
+              <button
+                className="secondary-button secondary-button--slate"
+                disabled={isRendering || !watermarkRect}
+                type="button"
+                onClick={handleApplyWatermarkToCurrentFrame}
+              >
+                执行当前帧去水印
+              </button>
+              <button
+                className="ghost-button"
+                disabled={!watermarkRect}
+                type="button"
+                onClick={handleClearWatermarkRect}
+              >
+                清除当前框选
+              </button>
+              <button
+                className="ghost-button"
+                disabled={!watermarkPasses.length}
+                type="button"
+                onClick={handleUndoWatermarkPass}
+              >
+                撤销上一次
+              </button>
+              <button
+                className="ghost-button"
+                disabled={!watermarkPasses.length}
+                type="button"
+                onClick={handleClearWatermarkPasses}
+              >
+                清空全部
+              </button>
+            </div>
+          </div>
+
+          {watermarkPasses.length ? (
+            <div className="watermark-pass-list">
+              {watermarkPasses.map((pass, index) => (
+                <span key={`${pass.scope}-${pass.scope === 'frame' ? pass.time : 'all'}-${index}`}>
+                  #{index + 1} · {pass.scope === 'all' ? '全部帧' : formatTimestamp(pass.time)} · x={pass.rect.x}, y={pass.rect.y}, {pass.rect.width}×{pass.rect.height}
+                </span>
+              ))}
+            </div>
+          ) : null}
+        </section>
+        ) : null}
+
+        {!isCutoutMode && showChromaStage ? (
+        <section className="panel chroma-panel">
+          <div className="panel-head panel-head--stack">
+            <div>
+              <h2>5. 参考帧与抠像预览</h2>
+              <span>直接在左侧基底图里点击背景颜色；当前帧会使用步骤4已经执行的去水印结果。</span>
             </div>
           </div>
 
           <>
-              <div className="reference-toolbar">
-                <label className="range-block">
-                  <span>参考帧时间</span>
-                  <input
-                    max={segmentEnd}
-                    min={segmentStart}
-                    step={0.01}
-                    type="range"
-                    value={referenceTime}
-                    onChange={(event) => setReferenceTime(Number(event.target.value))}
-                  />
-                </label>
-
-                <div className="reference-meta">
-                  <strong>{videoMeta ? formatTimestamp(referenceTime) : '00:00.000'}</strong>
-                  <span>{isReferenceLoading ? '参考帧更新中...' : `${formatTimestamp(segmentStart)} - ${formatTimestamp(segmentEnd)} 片段内取色`}</span>
-                </div>
-              </div>
-
               <div className="sample-badge-row">
                 <div className="sample-badge">
                   <span
@@ -2101,28 +2630,41 @@ function App() {
                     <span>
                       {samplePoint
                         ? `位置: (${samplePoint.x}, ${samplePoint.y})`
-                        : '可直接生成普通序列图，或点击左侧预览图取背景色'}
+                        : hasCommittedColorKeys
+                          ? `已应用 ${committedColorKeys.length} 次抠像，可继续点击左侧基底图取下一种颜色`
+                          : '可直接生成普通序列图，或点击左侧预览图取背景色'}
                     </span>
                   </div>
                 </div>
 
-                <button
-                  className="ghost-button"
-                  type="button"
-                  onClick={() => {
-                    setSamplePoint(null);
-                    setColorSample(null);
-                  }}
-                >
-                  清除颜色
-                </button>
+                <div className="sample-action-group">
+                  <button
+                    className="ghost-button"
+                    type="button"
+                    onClick={() => {
+                      setSamplePoint(null);
+                      setColorSample(null);
+                    }}
+                  >
+                    清除当前取色
+                  </button>
+                  {hasCommittedColorKeys ? (
+                    <button
+                      className="ghost-button"
+                      type="button"
+                      onClick={handleResetCommittedColorKeys}
+                    >
+                      重置多次抠像
+                    </button>
+                  ) : null}
+                </div>
               </div>
 
               <div className="reference-grid">
                 <div className="canvas-card">
                   <div className="canvas-head">
                     <div className="canvas-title">
-                      <span>原图</span>
+                      <span>{hasCommittedColorKeys ? '当前抠像基底' : '原图'}</span>
                       <small>{samplePoint ? '已选背景点，可继续点击更换' : '点击背景取样'}</small>
                     </div>
                   </div>
@@ -2134,7 +2676,13 @@ function App() {
                     />
                   </div>
                   <div className="canvas-footer">
-                    <span>{samplePoint ? `当前取样点：(${samplePoint.x}, ${samplePoint.y})` : '点击原图任意背景区域开始取色'}</span>
+                    <span>
+                      {samplePoint
+                        ? `当前取样点：(${samplePoint.x}, ${samplePoint.y})`
+                        : hasCommittedColorKeys
+                          ? `当前基底已累计应用 ${committedColorKeys.length} 次抠像`
+                          : '点击原图任意背景区域开始取色'}
+                    </span>
                   </div>
                 </div>
 
@@ -2240,62 +2788,121 @@ function App() {
                 </div>
               </div>
 
-              <div ref={chromaActionsRef} className="chroma-actions">
+              <div ref={chromaActionsRef} className="chroma-actions chroma-actions--stack">
+                {colorKeyOptions ? (
+                  <button
+                    className="secondary-button secondary-button--slate"
+                    type="button"
+                    onClick={handleCommitCurrentColorKey}
+                  >
+                    {hasCommittedColorKeys ? '应用当前抠像并继续下一轮' : '应用本次抠像并继续下一轮'}
+                  </button>
+                ) : null}
                 <button
                   className="primary-button chroma-generate-button"
-                  disabled={!canGenerate}
                   type="button"
-                  onClick={() => void handleGeneratePreview()}
+                  onClick={() => scrollToStep(resultPanelRef)}
                 >
-                  {isRendering
-                    ? '正在生成序列图...'
-                    : '4. 生成序列图'}
+                  完成抠像设置，进入步骤6
                 </button>
               </div>
           </>
         </section>
         ) : null}
 
-        {!isCutoutMode && showResultStage ? (
-        <section ref={resultPanelRef} className="result-grid">
-          <div className="panel preview-panel">
-            <div className="panel-head">
-              <h2>5. 序列图预览</h2>
-              <span>
-                {result
-                  ? `${resultTransparent ? '透明序列图' : '普通序列图'} · ${result.outputWidth} × ${result.outputHeight}`
-                  : '等待生成'}
-              </span>
+        {!isCutoutMode && showChromaStage ? (
+        <section ref={resultPanelRef} className="panel frame-picker-panel">
+          <div className="panel-head panel-head--stack">
+            <div>
+              <h2>6. 抽帧与预览</h2>
+              <span>调整每秒帧数后快捷抽帧；生成后可播放动画，并逐帧决定保留或排除。</span>
             </div>
 
-            <div className="segmented-control segmented-control--result">
-              <button
-                className={`segmented-button ${resultPreviewMode === 'sheet' ? 'is-active' : ''}`}
-                type="button"
-                onClick={() => setResultPreviewMode('sheet')}
-              >
-                序列图
-              </button>
-              <button
-                className={`segmented-button ${resultPreviewMode === 'animation' ? 'is-active' : ''}`}
-                disabled={!animationFrames.length}
-                type="button"
-                onClick={() => setResultPreviewMode('animation')}
-              >
-                动画预览
-              </button>
-            </div>
-
-            {result && resultPreviewMode === 'sheet' ? (
-              <div className="preview-wrap">
-                <img alt="生成的序列帧表预览" className="preview-image" src={result.objectUrl} />
+            {showFramePickerStage ? (
+              <div className="option-card option-card--metric">
+                <span>当前选中帧数</span>
+                <strong>{selectedFrameCount} / {extractedFrames?.length ?? 0}</strong>
+                <small>未勾选的帧不会进入预览、GIF、ZIP 与 Spine 导出。</small>
               </div>
-            ) : result && resultPreviewMode === 'animation' ? (
-              <>
+            ) : null}
+          </div>
+
+          <div className="control-grid">
+            <label className="field field-card">
+              <span>每秒提取帧数</span>
+              <input
+                min={1}
+                max={24}
+                type="number"
+                value={framesPerSecond}
+                onChange={(event) => setFramesPerSecond(Number(event.target.value) || 1)}
+              />
+            </label>
+
+            <div className="option-card option-card--metric">
+              <span>预计抽帧结果</span>
+              <strong>{estimatedFrameCount} 帧</strong>
+              <small>{selectedDuration.toFixed(2)} 秒片段</small>
+            </div>
+          </div>
+
+          <button
+            className="primary-button"
+            disabled={!canGenerate}
+            type="button"
+            onClick={() => void handleGeneratePreview()}
+          >
+            {isRendering
+              ? `正在抽帧 ${extractedFrames?.length ?? 0}/${estimatedFrameCount}...`
+              : showFramePickerStage
+                ? `重新快捷抽帧（预计 ${estimatedFrameCount} 帧）`
+                : `快捷抽帧（预计 ${estimatedFrameCount} 帧）`}
+          </button>
+
+          {frameLimitExceeded ? (
+            <p className="error-text">当前设置预计提取 {estimatedFrameCount} 帧，建议缩短片段或降低每秒帧数。</p>
+          ) : null}
+
+          <div className="segmented-control segmented-control--result">
+            <button
+              className={`segmented-button ${resultPreviewMode === 'sheet' ? 'is-active' : ''}`}
+              disabled={!result}
+              type="button"
+              onClick={() => setResultPreviewMode('sheet')}
+            >
+              序列图预览
+            </button>
+            <button
+              className={`segmented-button ${resultPreviewMode === 'animation' ? 'is-active' : ''}`}
+              disabled={!animationFrames.length}
+              type="button"
+              onClick={() => setResultPreviewMode('animation')}
+            >
+              动画预览
+            </button>
+          </div>
+
+          {result && resultPreviewMode === 'sheet' ? (
+            <div className="preview-wrap">
+              <img alt="生成的序列帧表预览" className="preview-image" src={result.objectUrl} />
+            </div>
+          ) : result && resultPreviewMode === 'animation' ? (
+            <>
+              <div
+                ref={resultAnimationPreviewRef}
+                className={`preview-wrap preview-wrap--animation preview-wrap--sequence-animation ${
+                  animationZoom > 100 ? 'is-zoomed' : ''
+                } ${
+                  resultTransparent ? 'preview-wrap--transparent' : 'preview-wrap--solid'
+                }`}
+                title="鼠标滚轮缩放预览"
+              >
                 <div
-                  className={`preview-wrap preview-wrap--animation ${
-                    resultTransparent ? 'preview-wrap--transparent' : 'preview-wrap--solid'
-                  }`}
+                  className="sequence-animation-stage"
+                  style={{
+                    width: `${animationZoom}%`,
+                    height: `${animationZoom}%`,
+                  }}
                 >
                   <canvas
                     ref={resultAnimationCanvasRef}
@@ -2303,50 +2910,134 @@ function App() {
                     className="preview-canvas"
                   />
                 </div>
-
-                <div className="animation-toolbar">
-                  <div className="animation-meta">
-                    <strong>
-                      第 {Math.min(animationFrameIndex + 1, animationFrames.length)} / {animationFrames.length} 帧
-                    </strong>
-                    <span>
-                      {animationFrames[animationFrameIndex]
-                        ? `${animationFrames[animationFrameIndex].label} · ${Math.min(Math.max(framesPerSecond, 1), 24)} FPS 预览`
-                        : '等待动画帧'}
-                    </span>
-                  </div>
-
-                  <div className="animation-actions">
-                    <button
-                      className="ghost-button"
-                      type="button"
-                      onClick={() => setAnimationPlaying((current) => !current)}
-                    >
-                      {animationPlaying ? '暂停' : '播放'}
-                    </button>
-                    <button
-                      className="ghost-button"
-                      type="button"
-                      onClick={() => {
-                        setAnimationFrameIndex(0);
-                        setAnimationPlaying(true);
-                      }}
-                    >
-                      重播
-                    </button>
-                  </div>
-                </div>
-              </>
-            ) : (
-              <div className="preview-empty">
-                生成完成后，这里会显示当前序列图效果。
               </div>
-            )}
-          </div>
 
+              <div className="animation-toolbar">
+                <div className="animation-meta">
+                  <strong>
+                    第 {Math.min(animationFrameIndex + 1, animationFrames.length)} / {animationFrames.length} 帧
+                  </strong>
+                  <span>
+                    {animationFrames[animationFrameIndex]
+                      ? `${animationFrames[animationFrameIndex].label} · ${Math.min(Math.max(framesPerSecond, 1), 24)} FPS 预览`
+                      : '等待动画帧'}
+                  </span>
+                </div>
+
+                <div className="animation-actions">
+                  <button
+                    aria-label="缩小动画预览"
+                    className="ghost-button"
+                    disabled={animationZoom <= MIN_PREVIEW_ZOOM}
+                    type="button"
+                    onClick={() => setAnimationZoom((current) => adjustPreviewZoom(current, -1))}
+                  >
+                    缩小
+                  </button>
+                  <span className="animation-zoom-value">{animationZoom}%</span>
+                  <button
+                    aria-label="放大动画预览"
+                    className="ghost-button"
+                    disabled={animationZoom >= MAX_PREVIEW_ZOOM}
+                    type="button"
+                    onClick={() => setAnimationZoom((current) => adjustPreviewZoom(current, 1))}
+                  >
+                    放大
+                  </button>
+                  <button
+                    className="ghost-button"
+                    disabled={animationZoom === 100}
+                    type="button"
+                    onClick={() => setAnimationZoom(100)}
+                  >
+                    适应
+                  </button>
+                  <button
+                    className="ghost-button"
+                    type="button"
+                    onClick={() => setAnimationPlaying((current) => !current)}
+                  >
+                    {animationPlaying ? '暂停' : '播放'}
+                  </button>
+                  <button
+                    className="ghost-button"
+                    type="button"
+                    onClick={() => {
+                      setAnimationFrameIndex(0);
+                      setAnimationPlaying(true);
+                    }}
+                  >
+                    重播
+                  </button>
+                </div>
+              </div>
+            </>
+          ) : (
+            <div className="preview-empty">
+              点击“快捷抽帧”后，这里会显示序列图和动画预览。
+            </div>
+          )}
+
+          {showFramePickerStage ? (
+            <>
+              <div className="frame-picker-actions">
+                <button className="ghost-button" type="button" onClick={handleSelectAllFrames}>
+                  全选
+                </button>
+                <button className="ghost-button" type="button" onClick={handleInvertFrameSelection}>
+                  反选
+                </button>
+                <button
+                  className="ghost-button"
+                  type="button"
+                  onClick={() => handleIntervalFrameSelection(1)}
+                >
+                  每隔1帧选1帧
+                </button>
+                <button
+                  className="ghost-button"
+                  type="button"
+                  onClick={() => handleIntervalFrameSelection(2)}
+                >
+                  每隔2帧选1帧
+                </button>
+              </div>
+
+              <div className="frame-picker-grid">
+                {(extractedFrames ?? []).map((frame, index) => {
+                  const checked = normalizedFrameSelection[index] !== false;
+
+                  return (
+                    <label
+                      key={`${frame.label}-${index}`}
+                      className={`frame-picker-card ${checked ? 'is-active' : 'is-disabled'}`}
+                    >
+                      <input
+                        checked={checked}
+                        type="checkbox"
+                        onChange={(event) => handleFrameSelectionChange(index, event.target.checked)}
+                      />
+                      <div className="frame-picker-thumb">
+                        <img alt={`第 ${index + 1} 帧缩略图`} src={frameThumbnailUrls[index]} />
+                      </div>
+                      <div className="frame-picker-meta">
+                        <strong>第 {index + 1} 帧</strong>
+                        <span>{frame.label}</span>
+                      </div>
+                    </label>
+                  );
+                })}
+              </div>
+            </>
+          ) : null}
+        </section>
+        ) : null}
+
+        {!isCutoutMode && showResultStage ? (
+        <section className="result-grid result-grid--single">
           <div className="panel download-panel">
             <div className="panel-head">
-              <h2>6. 导出结果</h2>
+              <h2>7. 导出结果</h2>
               <span>本地下载</span>
             </div>
 
@@ -2434,7 +3125,7 @@ function App() {
 
               <button
                 className="secondary-button secondary-button--emerald"
-                disabled={isRendering || !colorKeyOptions}
+                disabled={isRendering || !hasAnyColorKeyPass}
                 type="button"
                 onClick={() => void handleDownloadZip()}
               >
@@ -2449,7 +3140,7 @@ function App() {
           <section ref={spinePanelRef} className="result-grid spine-grid">
             <div className="panel preview-panel">
               <div className="panel-head">
-                <h2>7. Spine 动画工作区</h2>
+                <h2>8. Spine 动画工作区</h2>
                 <span>
                   {spineDraft.transparent ? '透明帧优先' : '普通帧'} · {spineDraft.width} × {spineDraft.height}
                 </span>
@@ -2600,20 +3291,6 @@ function App() {
           </section>
         ) : null}
 
-        <footer className="app-footer">
-          <div className="app-footer__brand">
-            <img
-              className="app-footer__avatar"
-              src={BRAND_ASSET_PATH}
-              alt="mowangblog 版权标识"
-            />
-            <div className="app-footer__copy">
-              <strong>© {currentYear} 今天又被Godot打了</strong>
-              <span>{isCutoutMode ? '背景抠图工具' : '视频转序列帧表'}</span>
-            </div>
-          </div>
-          <p className="app-footer__note">永久免费工具，欢迎一键三连➕关注支持更新。</p>
-        </footer>
       </main>
     </div>
   );

@@ -7,6 +7,7 @@ import type {
 } from './types';
 import {
   applyColorKey,
+  applyColorKeySequence,
   sampleCanvasColor,
 } from './lib/chromaKey';
 import { getBaseFileName } from './lib/exportBundle';
@@ -152,10 +153,12 @@ function drawCanvas(
 function ImageCutoutTool({ onStatusChange }: ImageCutoutToolProps) {
   const [imageName, setImageName] = useState<string | null>(null);
   const [sourceFrame, setSourceFrame] = useState<HTMLCanvasElement | null>(null);
+  const [workingFrame, setWorkingFrame] = useState<HTMLCanvasElement | null>(null);
   const [resultFrame, setResultFrame] = useState<HTMLCanvasElement | null>(null);
   const [maskFrame, setMaskFrame] = useState<HTMLCanvasElement | null>(null);
   const [samplePoint, setSamplePoint] = useState<SamplePoint | null>(null);
   const [colorSample, setColorSample] = useState<ColorSample | null>(null);
+  const [committedColorKeys, setCommittedColorKeys] = useState<ColorKeyOptions[]>([]);
   const [previewMode, setPreviewMode] = useState<PreviewMode>('result');
   const [solidPreviewColor, setSolidPreviewColor] = useState(DEFAULT_SOLID_PREVIEW_BG);
   const [tolerance, setTolerance] = useState(DEFAULT_TOLERANCE);
@@ -200,6 +203,12 @@ function ImageCutoutTool({ onStatusChange }: ImageCutoutToolProps) {
     softness,
     tolerance,
   ]);
+  const activeColorKeySequence = useMemo<ColorKeyOptions[]>(
+    () => (colorKeyOptions ? [...committedColorKeys, colorKeyOptions] : committedColorKeys),
+    [colorKeyOptions, committedColorKeys],
+  );
+  const hasCommittedColorKeys = committedColorKeys.length > 0;
+  const hasAnyColorKeyPass = activeColorKeySequence.length > 0;
 
   useEffect(() => {
     return () => {
@@ -210,45 +219,53 @@ function ImageCutoutTool({ onStatusChange }: ImageCutoutToolProps) {
   }, [resultUrl]);
 
   useEffect(() => {
-    if (!sourceFrame || !samplePoint) {
+    if (!workingFrame || !samplePoint) {
       setColorSample(null);
       return;
     }
 
     try {
       setColorSample(
-        sampleCanvasColor(sourceFrame, samplePoint.x, samplePoint.y, DEFAULT_SAMPLE_RADIUS),
+        sampleCanvasColor(workingFrame, samplePoint.x, samplePoint.y, DEFAULT_SAMPLE_RADIUS),
       );
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : '颜色取样失败。');
     }
-  }, [samplePoint, sourceFrame]);
+  }, [samplePoint, workingFrame]);
 
   useEffect(() => {
     if (!sourceFrame) {
+      setWorkingFrame(null);
       setResultFrame(null);
       setMaskFrame(null);
       return;
     }
 
-    if (!colorKeyOptions) {
-      setResultFrame(sourceFrame);
-      setMaskFrame(null);
-      return;
-    }
-
     try {
-      const preview = applyColorKey(sourceFrame, colorKeyOptions);
+      const committedPreview = hasCommittedColorKeys
+        ? applyColorKeySequence(sourceFrame, committedColorKeys)
+        : null;
+      const nextWorkingFrame = committedPreview?.image ?? sourceFrame;
+
+      setWorkingFrame(nextWorkingFrame);
+
+      if (!colorKeyOptions) {
+        setResultFrame(nextWorkingFrame);
+        setMaskFrame(committedPreview?.mask ?? null);
+        return;
+      }
+
+      const preview = applyColorKey(nextWorkingFrame, colorKeyOptions);
       setResultFrame(preview.image);
       setMaskFrame(preview.mask);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : '图片抠图预览失败。');
     }
-  }, [colorKeyOptions, sourceFrame]);
+  }, [colorKeyOptions, committedColorKeys, hasCommittedColorKeys, sourceFrame]);
 
   useEffect(() => {
-    drawCanvas(referenceCanvasRef.current, sourceFrame, samplePoint);
-  }, [samplePoint, sourceFrame]);
+    drawCanvas(referenceCanvasRef.current, workingFrame, samplePoint);
+  }, [samplePoint, workingFrame]);
 
   useEffect(() => {
     const source =
@@ -269,7 +286,9 @@ function ImageCutoutTool({ onStatusChange }: ImageCutoutToolProps) {
     onStatusChange('正在读取图片...');
     setSamplePoint(null);
     setColorSample(null);
+    setCommittedColorKeys([]);
     setPreviewMode('result');
+    setWorkingFrame(null);
     setResultFrame(null);
     setMaskFrame(null);
     setResultUrl((current) => {
@@ -305,24 +324,65 @@ function ImageCutoutTool({ onStatusChange }: ImageCutoutToolProps) {
   }
 
   function handleReferenceCanvasClick(event: React.MouseEvent<HTMLCanvasElement>): void {
-    if (!sourceFrame || !referenceCanvasRef.current) {
+    if (!workingFrame || !referenceCanvasRef.current) {
       return;
     }
 
     const point = getCanvasPoint(
       event,
       referenceCanvasRef.current,
-      sourceFrame.width,
-      sourceFrame.height,
+      workingFrame.width,
+      workingFrame.height,
     );
 
     setSamplePoint(point);
-    onStatusChange('背景颜色已采样，可以继续调整容差、羽化和去溢色。');
+    onStatusChange(
+      hasCommittedColorKeys
+        ? '新背景颜色已采样，可以继续调整参数，或先应用当前抠像再继续下一轮。'
+        : '背景颜色已采样，可以继续调整容差、羽化和去溢色。',
+    );
+  }
+
+  function clearResultUrl(): void {
+    setResultUrl((current) => {
+      if (current) {
+        URL.revokeObjectURL(current);
+      }
+
+      return null;
+    });
+  }
+
+  function handleCommitCurrentColorKey(): void {
+    if (!colorKeyOptions) {
+      return;
+    }
+
+    const nextCount = committedColorKeys.length + 1;
+    setCommittedColorKeys((current) => [...current, colorKeyOptions]);
+    setSamplePoint(null);
+    setColorSample(null);
+    setPreviewMode('result');
+    clearResultUrl();
+    onStatusChange(`已应用第 ${nextCount} 次抠像，可继续点击下一种背景颜色。`);
+  }
+
+  function handleResetCommittedColorKeys(): void {
+    if (!committedColorKeys.length) {
+      return;
+    }
+
+    setCommittedColorKeys([]);
+    setSamplePoint(null);
+    setColorSample(null);
+    setPreviewMode('result');
+    clearResultUrl();
+    onStatusChange('已重置为原图，可重新开始抠像。');
   }
 
   async function handleGenerate(): Promise<void> {
     try {
-      if (!resultFrame || !colorKeyOptions) {
+      if (!resultFrame || !hasAnyColorKeyPass) {
         throw new Error('请先在图片里点击背景颜色，再生成透明抠图。');
       }
 
@@ -354,7 +414,7 @@ function ImageCutoutTool({ onStatusChange }: ImageCutoutToolProps) {
 
   async function handleDownload(): Promise<void> {
     try {
-      if (!resultFrame || !colorKeyOptions) {
+      if (!resultFrame || !hasAnyColorKeyPass) {
         throw new Error('请先在图片里点击背景颜色，再导出透明抠图。');
       }
 
@@ -435,7 +495,7 @@ function ImageCutoutTool({ onStatusChange }: ImageCutoutToolProps) {
           <div className="panel-head panel-head--stack">
             <div>
               <h2>2. 图片抠图预览</h2>
-              <span>直接在左侧图片里点击背景颜色；右侧可切换结果、蒙版和纯色底检查。</span>
+              <span>直接在左侧基底图里点击背景颜色；每次应用后都可以继续抠下一种颜色。</span>
             </div>
           </div>
 
@@ -454,28 +514,41 @@ function ImageCutoutTool({ onStatusChange }: ImageCutoutToolProps) {
                 <span>
                   {samplePoint
                     ? `位置: (${samplePoint.x}, ${samplePoint.y})`
-                    : '点击左侧图片取背景色后生成透明抠图'}
+                    : hasCommittedColorKeys
+                      ? `已应用 ${committedColorKeys.length} 次抠像，可继续点击左侧基底图取下一种颜色`
+                      : '点击左侧图片取背景色后生成透明抠图'}
                 </span>
               </div>
             </div>
 
-            <button
-              className="ghost-button"
-              type="button"
-              onClick={() => {
-                setSamplePoint(null);
-                setColorSample(null);
-              }}
-            >
-              清除颜色
-            </button>
+            <div className="sample-action-group">
+              <button
+                className="ghost-button"
+                type="button"
+                onClick={() => {
+                  setSamplePoint(null);
+                  setColorSample(null);
+                }}
+              >
+                清除当前取色
+              </button>
+              {hasCommittedColorKeys ? (
+                <button
+                  className="ghost-button"
+                  type="button"
+                  onClick={handleResetCommittedColorKeys}
+                >
+                  重置多次抠像
+                </button>
+              ) : null}
+            </div>
           </div>
 
           <div className="reference-grid">
             <div className="canvas-card">
               <div className="canvas-head">
                 <div className="canvas-title">
-                  <span>原图</span>
+                  <span>{hasCommittedColorKeys ? '当前抠像基底' : '原图'}</span>
                   <small>{samplePoint ? '已选背景点，可继续点击更换' : '点击背景取样'}</small>
                 </div>
               </div>
@@ -487,7 +560,13 @@ function ImageCutoutTool({ onStatusChange }: ImageCutoutToolProps) {
                 />
               </div>
               <div className="canvas-footer">
-                <span>{samplePoint ? `当前取样点：(${samplePoint.x}, ${samplePoint.y})` : '点击原图任意背景区域开始取色'}</span>
+                <span>
+                  {samplePoint
+                    ? `当前取样点：(${samplePoint.x}, ${samplePoint.y})`
+                    : hasCommittedColorKeys
+                      ? `当前基底已累计应用 ${committedColorKeys.length} 次抠像`
+                      : '点击原图任意背景区域开始取色'}
+                </span>
               </div>
             </div>
 
@@ -593,10 +672,19 @@ function ImageCutoutTool({ onStatusChange }: ImageCutoutToolProps) {
             </div>
           </div>
 
-          <div className="chroma-actions">
+          <div className="chroma-actions chroma-actions--stack">
+            {colorKeyOptions ? (
+              <button
+                className="secondary-button secondary-button--slate"
+                type="button"
+                onClick={handleCommitCurrentColorKey}
+              >
+                {hasCommittedColorKeys ? '应用当前抠像并继续下一轮' : '应用本次抠像并继续下一轮'}
+              </button>
+            ) : null}
             <button
               className="primary-button chroma-generate-button"
-              disabled={!sourceFrame || !colorKeyOptions || isRendering}
+              disabled={!sourceFrame || !hasAnyColorKeyPass || isRendering}
               type="button"
               onClick={() => void handleGenerate()}
             >

@@ -1,11 +1,18 @@
-import { defineConfig } from 'vitest/config';
-import react from '@vitejs/plugin-react';
+import { cloudflare } from '@cloudflare/vite-plugin';
+import { defineConfig } from 'vite';
+import vinext from 'vinext';
+import { sites } from './build/sites-vite-plugin';
 
 export default defineConfig({
-  base: '/video-timesheet-web/',
-  plugins: [react()],
-  test: {
-    environment: 'jsdom',
-    setupFiles: './src/test/setup.ts',
-  },
+  plugins: [
+    vinext(),
+    sites(),
+    cloudflare({
+      viteEnvironment: { name: 'rsc', childEnvironments: ['ssr'] },
+      config: {
+        main: './worker/index.ts',
+        compatibility_flags: ['nodejs_compat'],
+      },
+    }),
+  ],
 });
