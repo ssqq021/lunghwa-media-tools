@@ -30,8 +30,11 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Build
-        run: npm run build
+      - name: Test
+        run: npm run test
+
+      - name: Build GitHub Pages
+        run: npm run build:pages
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
@@ -39,7 +42,7 @@ jobs:
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: dist
+          path: dist-pages
 
   deploy:
     environment:

@@ -211,6 +211,7 @@ export function sampleCanvasColor(
 export function applyColorKey(
   source: HTMLCanvasElement,
   options: ColorKeyOptions,
+  protectionMask?: Uint8Array | null,
 ): {
   image: HTMLCanvasElement;
   mask: HTMLCanvasElement;
@@ -237,13 +238,24 @@ export function applyColorKey(
   const maskPixels = maskImageData.data;
 
   for (let index = 0; index < sourcePixels.length; index += 4) {
+    const sourceAlpha = sourcePixels[index + 3];
+    if (protectionMask?.[index / 4]) {
+      outputPixels[index] = sourcePixels[index];
+      outputPixels[index + 1] = sourcePixels[index + 1];
+      outputPixels[index + 2] = sourcePixels[index + 2];
+      outputPixels[index + 3] = sourceAlpha;
+      maskPixels[index] = sourceAlpha;
+      maskPixels[index + 1] = sourceAlpha;
+      maskPixels[index + 2] = sourceAlpha;
+      maskPixels[index + 3] = 255;
+      continue;
+    }
+
     const pixel = {
       r: sourcePixels[index],
       g: sourcePixels[index + 1],
       b: sourcePixels[index + 2],
     };
-    const sourceAlpha = sourcePixels[index + 3];
-
     const distance = computeColorDistance(pixel, options.sample.rgb, options.algorithm);
     const opacity = getOpacityForDistance(
       distance,
@@ -285,6 +297,7 @@ export function applyColorKey(
 export function applyColorKeySequence(
   source: HTMLCanvasElement,
   optionsList: ColorKeyOptions[],
+  protectionMask?: Uint8Array | null,
 ): {
   image: HTMLCanvasElement;
   mask: HTMLCanvasElement;
@@ -297,11 +310,11 @@ export function applyColorKeySequence(
   }
 
   let current = source;
-  let latest = applyColorKey(current, optionsList[0]);
+  let latest = applyColorKey(current, optionsList[0], protectionMask);
   current = latest.image;
 
   for (let index = 1; index < optionsList.length; index += 1) {
-    latest = applyColorKey(current, optionsList[index]);
+    latest = applyColorKey(current, optionsList[index], protectionMask);
     current = latest.image;
   }
 
@@ -311,8 +324,9 @@ export function applyColorKeySequence(
 export function processExtractedFrame(
   frame: ExtractedFrame,
   options: ColorKeyOptions,
+  protectionMask?: Uint8Array | null,
 ): ProcessedFrame {
-  const processed = applyColorKey(frame.image, options);
+  const processed = applyColorKey(frame.image, options, protectionMask);
 
   return {
     ...frame,
@@ -324,8 +338,9 @@ export function processExtractedFrame(
 export function processExtractedFrameWithSequence(
   frame: ExtractedFrame,
   optionsList: ColorKeyOptions[],
+  protectionMask?: Uint8Array | null,
 ): ProcessedFrame {
-  const processed = applyColorKeySequence(frame.image, optionsList);
+  const processed = applyColorKeySequence(frame.image, optionsList, protectionMask);
 
   return {
     ...frame,

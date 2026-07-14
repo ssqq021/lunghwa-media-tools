@@ -1,4 +1,4 @@
-# video-timesheet-web
+# lunghwa-media-tools
 
 一个纯前端工具站，用来把本地视频转换成序列帧资源。  
 当前版本支持浏览器内裁剪、按片段提帧、点选背景色抠图、导出精灵图、动画 GIF、透明单帧 ZIP，以及进一步生成 Spine 动画资源包。
@@ -108,7 +108,7 @@ npm run dev
 本地默认地址通常是：
 
 ```text
-http://localhost:5173/video-timesheet-web/
+http://localhost:5173/lunghwa-media-tools/
 ```
 
 ## 测试与构建
@@ -127,10 +127,10 @@ npm run build
 
 ## GitHub Pages 部署
 
-仓库名固定为 `video-timesheet-web`，Vite `base` 已配置为：
+仓库名为 `lunghwa-media-tools`，GitHub Pages 构建的 Vite `base` 配置为：
 
 ```text
-/video-timesheet-web/
+/lunghwa-media-tools/
 ```
 
 部署方式：

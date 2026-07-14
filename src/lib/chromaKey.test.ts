@@ -166,4 +166,65 @@ describe('chroma key helpers', () => {
     expect(readPixel(result.image, 0, 0)[3]).toBe(0);
     expect(readPixel(result.image, 1, 0)[3]).toBe(0);
   });
+
+  it('keeps protected pixels unchanged during color keying', () => {
+    const source = createCanvas(2, 1, [
+      0, 255, 0, 255,
+      0, 255, 0, 255,
+    ]);
+    const options = {
+      sample: { x: 0, y: 0, hex: '#00ff00', rgb: { r: 0, g: 255, b: 0 } },
+      tolerance: 0,
+      softness: 0,
+      despill: 0,
+      sampleRadius: 0,
+      edgeRadius: 0,
+      smoothing: false,
+      despillEnabled: false,
+      algorithm: 'classic' as const,
+    };
+
+    const result = applyColorKey(source, options, Uint8Array.from([1, 0]));
+
+    expect(readPixel(result.image, 0, 0)).toEqual([0, 255, 0, 255]);
+    expect(readPixel(result.image, 1, 0)[3]).toBe(0);
+  });
+
+  it('keeps protected pixels unchanged across multiple color key passes', () => {
+    const source = createCanvas(2, 1, [
+      0, 255, 0, 255,
+      255, 0, 255, 255,
+    ]);
+    const result = applyColorKeySequence(
+      source,
+      [
+        {
+          sample: { x: 0, y: 0, hex: '#00ff00', rgb: { r: 0, g: 255, b: 0 } },
+          tolerance: 0,
+          softness: 0,
+          despill: 0,
+          sampleRadius: 0,
+          edgeRadius: 0,
+          smoothing: false,
+          despillEnabled: false,
+          algorithm: 'classic',
+        },
+        {
+          sample: { x: 1, y: 0, hex: '#ff00ff', rgb: { r: 255, g: 0, b: 255 } },
+          tolerance: 0,
+          softness: 0,
+          despill: 0,
+          sampleRadius: 0,
+          edgeRadius: 0,
+          smoothing: false,
+          despillEnabled: false,
+          algorithm: 'classic',
+        },
+      ],
+      Uint8Array.from([1, 0]),
+    );
+
+    expect(readPixel(result.image, 0, 0)).toEqual([0, 255, 0, 255]);
+    expect(readPixel(result.image, 1, 0)[3]).toBe(0);
+  });
 });

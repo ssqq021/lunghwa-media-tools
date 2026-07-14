@@ -41,6 +41,7 @@ import {
 } from './lib/sheet';
 import { formatTimestamp } from './lib/time';
 import { adjustPreviewZoom, MAX_PREVIEW_ZOOM, MIN_PREVIEW_ZOOM } from './lib/previewZoom';
+import { paintProtectionStroke, type MaskPoint } from './lib/protectionMask';
 import {
   createFrameSelection,
   createIntervalFrameSelection,
@@ -118,6 +119,8 @@ type DragSelection = {
   start: SamplePoint;
   current: SamplePoint;
 };
+
+type ProtectionBrushMode = 'off' | 'protect' | 'erase';
 
 type SheetPreviewConfig = {
   columns: number;
@@ -297,6 +300,34 @@ function drawCropSelectionCanvas(
   context.restore();
 }
 
+function drawProtectionOverlay(
+  target: HTMLCanvasElement | null,
+  mask: Uint8Array | null,
+): void {
+  if (!target || !mask || mask.length !== target.width * target.height) {
+    return;
+  }
+
+  const context = target.getContext('2d');
+  if (!context) {
+    return;
+  }
+
+  const imageData = context.getImageData(0, 0, target.width, target.height);
+  const pixels = imageData.data;
+  for (let pixelIndex = 0; pixelIndex < mask.length; pixelIndex += 1) {
+    if (!mask[pixelIndex]) {
+      continue;
+    }
+
+    const offset = pixelIndex * 4;
+    pixels[offset] = Math.round(pixels[offset] * 0.55 + 34 * 0.45);
+    pixels[offset + 1] = Math.round(pixels[offset + 1] * 0.55 + 197 * 0.45);
+    pixels[offset + 2] = Math.round(pixels[offset + 2] * 0.55 + 94 * 0.45);
+  }
+  context.putImageData(imageData, 0, 0);
+}
+
 function drawWatermarkSelectionCanvas(
   target: HTMLCanvasElement | null,
   source: HTMLCanvasElement | null,
@@ -391,6 +422,10 @@ function App() {
   const [samplePoint, setSamplePoint] = useState<SamplePoint | null>(null);
   const [colorSample, setColorSample] = useState<ColorSample | null>(null);
   const [committedColorKeys, setCommittedColorKeys] = useState<ColorKeyOptions[]>([]);
+  const [protectionMask, setProtectionMask] = useState<Uint8Array | null>(null);
+  const [protectionUndoStack, setProtectionUndoStack] = useState<Uint8Array[]>([]);
+  const [protectionBrushMode, setProtectionBrushMode] = useState<ProtectionBrushMode>('off');
+  const [protectionBrushSize, setProtectionBrushSize] = useState(48);
   const [previewMode, setPreviewMode] = useState<PreviewMode>('result');
   const [solidPreviewColor, setSolidPreviewColor] = useState(DEFAULT_SOLID_PREVIEW_BG);
   const [result, setResult] = useState<RenderResult | null>(null);
@@ -450,6 +485,9 @@ function App() {
   const hasInitializedAssetInvalidationRef = useRef(false);
   const latestVideoUrlRef = useRef<string | null>(null);
   const latestResultRef = useRef<RenderResult | null>(null);
+  const protectionMaskRef = useRef<Uint8Array | null>(null);
+  const protectionPaintingRef = useRef(false);
+  const protectionLastPointRef = useRef<MaskPoint | null>(null);
 
   const sheetOptions: SheetOptions = {
     columns,
@@ -702,6 +740,10 @@ function App() {
   );
   const hasCommittedColorKeys = committedColorKeys.length > 0;
   const hasAnyColorKeyPass = activeColorKeySequence.length > 0;
+  const protectedPixelCount = useMemo(
+    () => protectionMask?.reduce((count, value) => count + (value ? 1 : 0), 0) ?? 0,
+    [protectionMask],
+  );
 
   const isCutoutMode = appMode === 'cutout';
   const isResizeMode = appMode === 'resize';
@@ -750,6 +792,15 @@ function App() {
   function disposeReferenceReader(): void {
     readerRef.current?.dispose();
     readerRef.current = null;
+  }
+
+  function resetProtectionMask(): void {
+    protectionMaskRef.current = null;
+    protectionPaintingRef.current = false;
+    protectionLastPointRef.current = null;
+    setProtectionMask(null);
+    setProtectionUndoStack([]);
+    setProtectionBrushMode('off');
   }
 
   function clearDerivedOutputs(nextStatus?: string): void {
@@ -1010,7 +1061,7 @@ function App() {
 
     try {
       const committedPreview = hasCommittedColorKeys
-        ? applyColorKeySequence(referenceFrameAfterWatermark, committedColorKeys)
+        ? applyColorKeySequence(referenceFrameAfterWatermark, committedColorKeys, protectionMask)
         : null;
       const committedFrame = committedPreview?.image ?? referenceFrameAfterWatermark;
 
@@ -1022,17 +1073,18 @@ function App() {
         return;
       }
 
-      const preview = applyColorKey(committedFrame, colorKeyOptions);
+      const preview = applyColorKey(committedFrame, colorKeyOptions, protectionMask);
       setReferenceResultFrame(preview.image);
       setReferenceMaskFrame(preview.mask);
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : '参考帧预览失败。');
     }
-  }, [colorKeyOptions, committedColorKeys, hasCommittedColorKeys, referenceFrameAfterWatermark]);
+  }, [colorKeyOptions, committedColorKeys, hasCommittedColorKeys, protectionMask, referenceFrameAfterWatermark]);
 
   useEffect(() => {
     drawCanvas(referenceCanvasRef.current, referenceCommittedFrame, samplePoint);
-  }, [referenceCommittedFrame, samplePoint]);
+    drawProtectionOverlay(referenceCanvasRef.current, protectionMask);
+  }, [protectionMask, referenceCommittedFrame, samplePoint]);
 
   useEffect(() => {
     drawCropSelectionCanvas(cropSelectionCanvasRef.current, referenceRawFrame, activeCropArea);
@@ -1323,6 +1375,7 @@ function App() {
     colorSample?.hex,
     committedColorKeySignature,
     despillEnabled,
+    protectionMask,
     samplePoint?.x,
     samplePoint?.y,
     smoothing,
@@ -1352,6 +1405,7 @@ function App() {
     setWatermarkRect(null);
     setWatermarkDragSelection(null);
     setWatermarkPasses([]);
+    resetProtectionMask();
     if (extractedFrames || processedFrames || result) {
       setFrameSelection(null);
       clearGeneratedAssets('裁剪范围或视频已更新，请重新设置去水印区域并抽帧。');
@@ -1381,6 +1435,7 @@ function App() {
     setSamplePoint(null);
     setColorSample(null);
     setCommittedColorKeys([]);
+    resetProtectionMask();
     setFrameSelection(null);
     setWatermarkRect(null);
     setWatermarkDragSelection(null);
@@ -1517,7 +1572,9 @@ function App() {
 
       for (const [index, frame] of framesWithWatermarkHandled.entries()) {
         setStatus(`正在执行 ChromaKey 抠像 ${index + 1}/${framesWithWatermarkHandled.length}...`);
-        nextProcessedFrames.push(processExtractedFrameWithSequence(frame, activeColorKeySequence));
+        nextProcessedFrames.push(
+          processExtractedFrameWithSequence(frame, activeColorKeySequence, protectionMask),
+        );
         if (index < framesWithWatermarkHandled.length - 1) {
           await nextFrame();
         }
@@ -1839,8 +1896,151 @@ function App() {
     setDragSelection(null);
   }
 
+  function paintProtectionMaskToPoint(point: MaskPoint): void {
+    if (!referenceCommittedFrame || protectionBrushMode === 'off') {
+      return;
+    }
+
+    const expectedLength = referenceCommittedFrame.width * referenceCommittedFrame.height;
+    const mask =
+      protectionMaskRef.current?.length === expectedLength
+        ? protectionMaskRef.current
+        : new Uint8Array(expectedLength);
+    const start = protectionLastPointRef.current ?? point;
+    paintProtectionStroke(
+      mask,
+      referenceCommittedFrame.width,
+      referenceCommittedFrame.height,
+      start,
+      point,
+      protectionBrushSize / 2,
+      protectionBrushMode === 'protect',
+    );
+    protectionMaskRef.current = mask;
+    protectionLastPointRef.current = point;
+    setProtectionMask(new Uint8Array(mask));
+  }
+
+  function selectProtectionBrushMode(mode: ProtectionBrushMode): void {
+    setProtectionBrushMode(mode);
+    if (mode === 'off') {
+      setStatus('已退出保护笔刷，可继续点击画面取背景色。');
+      return;
+    }
+
+    setSamplePoint(null);
+    setColorSample(null);
+    setStatus(
+      mode === 'protect'
+        ? '保护笔刷已开启，请在人物或特效上涂抹绿色保护区域。'
+        : '保护橡皮擦已开启，请涂抹要取消保护的区域。',
+    );
+  }
+
+  function handleProtectionPointerDown(event: React.PointerEvent<HTMLCanvasElement>): void {
+    if (!referenceCommittedFrame || protectionBrushMode === 'off') {
+      return;
+    }
+
+    event.preventDefault();
+    const expectedLength = referenceCommittedFrame.width * referenceCommittedFrame.height;
+    const currentMask =
+      protectionMaskRef.current?.length === expectedLength
+        ? new Uint8Array(protectionMaskRef.current)
+        : new Uint8Array(expectedLength);
+    setProtectionUndoStack((current) => [...current.slice(-19), currentMask]);
+    protectionMaskRef.current = new Uint8Array(currentMask);
+    protectionPaintingRef.current = true;
+    const point = getCanvasPoint(
+      event,
+      event.currentTarget,
+      referenceCommittedFrame.width,
+      referenceCommittedFrame.height,
+    );
+    protectionLastPointRef.current = point;
+    event.currentTarget.setPointerCapture(event.pointerId);
+    paintProtectionMaskToPoint(point);
+  }
+
+  function handleProtectionPointerMove(event: React.PointerEvent<HTMLCanvasElement>): void {
+    if (!referenceCommittedFrame || !protectionPaintingRef.current) {
+      return;
+    }
+
+    const point = getCanvasPoint(
+      event,
+      event.currentTarget,
+      referenceCommittedFrame.width,
+      referenceCommittedFrame.height,
+    );
+    paintProtectionMaskToPoint(point);
+  }
+
+  function finishProtectionStroke(event: React.PointerEvent<HTMLCanvasElement>): void {
+    if (!referenceCommittedFrame || !protectionPaintingRef.current) {
+      return;
+    }
+
+    const point = getCanvasPoint(
+      event,
+      event.currentTarget,
+      referenceCommittedFrame.width,
+      referenceCommittedFrame.height,
+    );
+    paintProtectionMaskToPoint(point);
+    protectionPaintingRef.current = false;
+    protectionLastPointRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    setStatus(
+      protectionBrushMode === 'protect'
+        ? '保护区域已更新，绿色区域不会被抠像影响。'
+        : '已擦除部分保护区域。',
+    );
+  }
+
+  function handleProtectionPointerCancel(event: React.PointerEvent<HTMLCanvasElement>): void {
+    protectionPaintingRef.current = false;
+    protectionLastPointRef.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+  }
+
+  function handleUndoProtectionStroke(): void {
+    const previous = protectionUndoStack[protectionUndoStack.length - 1];
+    if (!previous) {
+      return;
+    }
+
+    const restored = new Uint8Array(previous);
+    protectionMaskRef.current = restored;
+    setProtectionMask(restored);
+    setProtectionUndoStack((current) => current.slice(0, -1));
+    setStatus('已撤销上一次保护笔刷操作。');
+  }
+
+  function handleClearProtectionMask(): void {
+    if (!protectionMask || protectedPixelCount === 0) {
+      return;
+    }
+
+    setProtectionUndoStack((current) => [
+      ...current.slice(-19),
+      new Uint8Array(protectionMask),
+    ]);
+    protectionMaskRef.current = null;
+    setProtectionMask(null);
+    setStatus('已清空全部抠像保护区域。');
+  }
+
   function handleReferenceCanvasClick(event: React.MouseEvent<HTMLCanvasElement>): void {
-    if (!referenceCommittedFrame || !referenceCanvasRef.current) {
+    if (
+      protectionBrushMode !== 'off' ||
+      !referenceCommittedFrame ||
+      !referenceCanvasRef.current
+    ) {
       return;
     }
 
@@ -2080,6 +2280,7 @@ function App() {
     setSamplePoint(null);
     setColorSample(null);
     setCommittedColorKeys([]);
+    resetProtectionMask();
     setFrameSelection(null);
     setWatermarkRect(null);
     setWatermarkDragSelection(null);
@@ -2660,6 +2861,71 @@ function App() {
                 </div>
               </div>
 
+              <div className="protection-toolbar">
+                <div className="protection-toolbar__copy">
+                  <strong>抠像保护笔刷</strong>
+                  <span>绿色区域会在全部抽帧的相同位置保留原始颜色和透明度。</span>
+                </div>
+
+                <div className="protection-toolbar__controls">
+                  <div className="segmented-control">
+                    <button
+                      className={`segmented-button ${protectionBrushMode === 'protect' ? 'is-active' : ''}`}
+                      type="button"
+                      onClick={() => selectProtectionBrushMode('protect')}
+                    >
+                      保护涂抹
+                    </button>
+                    <button
+                      className={`segmented-button ${protectionBrushMode === 'erase' ? 'is-active' : ''}`}
+                      type="button"
+                      onClick={() => selectProtectionBrushMode('erase')}
+                    >
+                      橡皮擦
+                    </button>
+                    <button
+                      className={`segmented-button ${protectionBrushMode === 'off' ? 'is-active' : ''}`}
+                      type="button"
+                      onClick={() => selectProtectionBrushMode('off')}
+                    >
+                      退出笔刷
+                    </button>
+                  </div>
+
+                  <label className="protection-brush-size">
+                    <span>笔刷大小：{protectionBrushSize}px</span>
+                    <input
+                      max={160}
+                      min={6}
+                      type="range"
+                      value={protectionBrushSize}
+                      onChange={(event) => setProtectionBrushSize(Number(event.target.value))}
+                    />
+                  </label>
+
+                  <div className="protection-toolbar__actions">
+                    <button
+                      className="ghost-button"
+                      disabled={!protectionUndoStack.length}
+                      type="button"
+                      onClick={handleUndoProtectionStroke}
+                    >
+                      撤销笔画
+                    </button>
+                    <button
+                      className="ghost-button"
+                      disabled={protectedPixelCount === 0}
+                      type="button"
+                      onClick={handleClearProtectionMask}
+                    >
+                      清空保护区
+                    </button>
+                  </div>
+                </div>
+
+                <small>已保护 {protectedPixelCount.toLocaleString()} 像素</small>
+              </div>
+
               <div className="reference-grid">
                 <div className="canvas-card">
                   <div className="canvas-head">
@@ -2671,14 +2937,22 @@ function App() {
                   <div className="canvas-surface">
                     <canvas
                       ref={referenceCanvasRef}
-                      className="preview-canvas"
+                      className={`preview-canvas ${protectionBrushMode !== 'off' ? 'is-protection-brush' : ''}`}
                       onClick={handleReferenceCanvasClick}
+                      onPointerCancel={handleProtectionPointerCancel}
+                      onPointerDown={handleProtectionPointerDown}
+                      onPointerMove={handleProtectionPointerMove}
+                      onPointerUp={finishProtectionStroke}
                     />
                   </div>
                   <div className="canvas-footer">
                     <span>
                       {samplePoint
                         ? `当前取样点：(${samplePoint.x}, ${samplePoint.y})`
+                        : protectionBrushMode !== 'off'
+                          ? protectionBrushMode === 'protect'
+                            ? '正在涂抹保护区域，绿色像素不会被抠除'
+                            : '正在擦除保护区域'
                         : hasCommittedColorKeys
                           ? `当前基底已累计应用 ${committedColorKeys.length} 次抠像`
                           : '点击原图任意背景区域开始取色'}
