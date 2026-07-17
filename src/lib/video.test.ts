@@ -1,5 +1,21 @@
 import { describe, expect, it } from 'vitest';
-import { getCropBounds, getSampleTimes, normalizeCropArea } from './video';
+import {
+  getCropBounds,
+  getSampleTimes,
+  getSegmentLoopSeekTime,
+  normalizeCropArea,
+} from './video';
+
+describe('getSegmentLoopSeekTime', () => {
+  it('restarts playback when the preview is before or at the end of the selected segment', () => {
+    expect(getSegmentLoopSeekTime(1.5, 2, 6)).toBe(2);
+    expect(getSegmentLoopSeekTime(6, 2, 6)).toBe(2);
+  });
+
+  it('keeps playback running while it is inside the selected segment', () => {
+    expect(getSegmentLoopSeekTime(4, 2, 6)).toBeNull();
+  });
+});
 
 describe('getSampleTimes', () => {
   it('returns evenly spaced timestamps based on frames per second', () => {

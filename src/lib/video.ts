@@ -144,6 +144,20 @@ function clampTime(time: number, duration: number): number {
   return Math.max(0, Math.min(time, duration));
 }
 
+export function getSegmentLoopSeekTime(
+  currentTime: number,
+  segmentStart: number,
+  segmentEnd: number,
+): number | null {
+  if (![currentTime, segmentStart, segmentEnd].every(Number.isFinite)) {
+    return null;
+  }
+
+  const start = Math.max(0, Math.min(segmentStart, segmentEnd));
+  const end = Math.max(start, segmentEnd);
+  return currentTime < start || currentTime >= end ? start : null;
+}
+
 function clampValue(value: number, min: number, max: number): number {
   if (!Number.isFinite(value)) {
     return min;

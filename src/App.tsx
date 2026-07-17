@@ -57,6 +57,7 @@ import {
   extractFrames,
   getCropBounds,
   getSampleTimes,
+  getSegmentLoopSeekTime,
   loadVideoAsset,
   normalizeCropArea,
   revokeVideoAsset,
@@ -460,6 +461,7 @@ function App() {
   const referenceCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const watermarkCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const segmentPreviewVideoRef = useRef<HTMLVideoElement | null>(null);
   const watermarkVideoRef = useRef<HTMLVideoElement | null>(null);
   const resultAnimationCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const resultAnimationPreviewRef = useRef<HTMLDivElement | null>(null);
@@ -1023,6 +1025,16 @@ function App() {
   }, [referenceTime, segmentEnd, segmentStart, videoMeta]);
 
   useEffect(() => {
+    const preview = segmentPreviewVideoRef.current;
+    if (!preview || !videoMeta || !videoUrl) {
+      return;
+    }
+
+    preview.currentTime = segmentStart;
+    void preview.play().catch(() => undefined);
+  }, [segmentEnd, segmentStart, videoMeta, videoUrl]);
+
+  useEffect(() => {
     if (!samplePoint && !colorSample) {
       return;
     }
@@ -1460,7 +1472,7 @@ function App() {
       setSegmentEnd(Number(asset.meta.duration.toFixed(3)));
       setReferenceTime(0);
       setPreviewMode('result');
-      setStatus('视频已就绪，请先裁剪画面，再设置片段并提取参考帧。');
+      setStatus('视频已就绪，请先选择视频片段并预览，再裁剪画面。');
       scrollToStep(cropPanelRef);
     } catch (nextError) {
       setVideoMeta(null);
@@ -1884,7 +1896,7 @@ function App() {
       ),
     );
     setDragSelection(null);
-    setStatus('裁剪区域已更新，下一步请设置片段并提取参考帧。');
+    setStatus('裁剪区域已更新，可以确认片段与裁剪并提取参考帧。');
     scrollToStep(controlsPanelRef);
   }
 
@@ -2431,139 +2443,11 @@ function App() {
         {!isCutoutMode && videoMeta ? (
           <section ref={cropPanelRef} className="crop-row">
             <div className="crop-picker crop-picker--row">
-              <div className="crop-preview-grid">
-                <div className="canvas-card">
-                  <div className="canvas-head">
-                    <div className="canvas-title">
-                      <span>鼠标框选裁剪</span>
-                      <small>在参考画面上拖拽，直接选择要保留的区域</small>
-                    </div>
-                  </div>
-                  <div className="canvas-surface crop-canvas-surface" style={cropSurfaceStyle}>
-                    {referenceRawFrame ? (
-                      <canvas
-                        ref={cropSelectionCanvasRef}
-                        className="preview-canvas crop-preview-canvas crop-selection-canvas"
-                        onPointerCancel={handleCropPointerCancel}
-                        onPointerDown={handleCropPointerDown}
-                        onPointerMove={handleCropPointerMove}
-                        onPointerUp={finishCropSelection}
-                      />
-                    ) : (
-                      <div className="crop-placeholder">视频读取后可直接鼠标框选裁剪区域</div>
-                    )}
-                  </div>
-                  <div className="canvas-footer">
-                    <span>也可以继续用下面的数值输入精确微调</span>
-                  </div>
-                </div>
-
-                <div className="canvas-card">
-                  <div className="canvas-head">
-                    <div className="canvas-title">
-                      <span>裁剪预览</span>
-                      <small>这里会实时显示当前裁剪后的输出画面</small>
-                    </div>
-                  </div>
-                  <div className="canvas-surface crop-canvas-surface" style={cropSurfaceStyle}>
-                    {referenceRawFrame ? (
-                      <canvas
-                        ref={cropPreviewCanvasRef}
-                        className="preview-canvas crop-preview-canvas"
-                      />
-                    ) : (
-                      <div className="crop-placeholder">视频读取后，这里会显示裁剪预览</div>
-                    )}
-                  </div>
-                  <div className="canvas-footer">
-                    <span>
-                      当前输出尺寸：{activeCropBounds?.width ?? videoMeta.width} ×{' '}
-                      {activeCropBounds?.height ?? videoMeta.height}
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              <div className="crop-controls-grid">
-                <div className="crop-controls-pane">
+              <div className="segment-step-grid">
+                <div className="controls-pane">
                   <div className="crop-controls-head">
-                    <strong>2. 画面裁剪</strong>
-                    <span>
-                      当前输出尺寸：{activeCropBounds?.width ?? videoMeta.width} ×{' '}
-                      {activeCropBounds?.height ?? videoMeta.height}
-                    </span>
-                  </div>
-
-                  <div className="crop-controls-head">
-                    <strong>裁剪微调</strong>
-                    <span>继续用数值做精确裁剪</span>
-                  </div>
-
-                  <div className="crop-grid">
-                    <label className="field">
-                      <span>左侧偏移 (%)</span>
-                      <input
-                        min={0}
-                        max={99}
-                        type="number"
-                        value={cropLeftPercent}
-                        onChange={(event) => handleCropLeftChange(Number(event.target.value) || 0)}
-                      />
-                    </label>
-
-                    <label className="field">
-                      <span>顶部偏移 (%)</span>
-                      <input
-                        min={0}
-                        max={99}
-                        type="number"
-                        value={cropTopPercent}
-                        onChange={(event) => handleCropTopChange(Number(event.target.value) || 0)}
-                      />
-                    </label>
-
-                    <label className="field">
-                      <span>裁剪宽度 (%)</span>
-                      <input
-                        min={1}
-                        max={100 - cropLeftPercent}
-                        type="number"
-                        value={cropWidthPercent}
-                        onChange={(event) => handleCropWidthChange(Number(event.target.value) || 1)}
-                      />
-                    </label>
-
-                    <label className="field">
-                      <span>裁剪高度 (%)</span>
-                      <input
-                        min={1}
-                        max={100 - cropTopPercent}
-                        type="number"
-                        value={cropHeightPercent}
-                        onChange={(event) => handleCropHeightChange(Number(event.target.value) || 1)}
-                      />
-                    </label>
-                  </div>
-
-                  <div className="crop-picker__footer">
-                    <small>
-                      你可以直接鼠标框选，也可以继续用百分比数值精确裁剪。
-                    </small>
-                    <button
-                      className="ghost-button"
-                      disabled={!isCropApplied}
-                      type="button"
-                      onClick={resetCropArea}
-                    >
-                      重置裁剪
-                    </button>
-                  </div>
-                </div>
-
-                <div ref={controlsPanelRef} className="controls-pane">
-                  <div className="crop-controls-head">
-                    <strong>3. 视频片段与参考帧</strong>
-                    <span>确认处理片段，再进入去水印和抠像设置。</span>
+                    <strong>2. 视频片段与参考帧</strong>
+                    <span>先选择需要处理的片段，右侧会循环播放当前范围。</span>
                   </div>
 
                   <div className="segment-picker">
@@ -2622,27 +2506,211 @@ function App() {
                       </div>
                     </div>
                   </div>
+                </div>
 
-                  <button
-                    className="primary-button"
-                    type="button"
-                      onClick={() => {
-                        pendingChromaScrollTopRef.current = window.scrollY;
-                        setReferenceTime(firstSampleTime);
-                        setIsChromaStageOpen(true);
-                        pendingChromaScrollRef.current = true;
-                        setStatus(
-                          isCutoutMode
-                            ? '已提取参考帧，请点击背景颜色开始抠图。'
-                            : '参考帧已就绪，请先设置去水印区域，再进行抠像。'
-                        );
-                      }}
-                  >
-                    {isChromaStageOpen ? '重新确认参考帧' : '确认片段并提取参考帧'}
-                  </button>
-                  {error ? <p className="error-text">{error}</p> : null}
+                <div className="video-preview-card segment-preview-card">
+                  <div className="segment-preview-card__head">
+                    <span>所选片段预览</span>
+                    <strong>循环播放</strong>
+                  </div>
+                  <video
+                    ref={segmentPreviewVideoRef}
+                    aria-label="所选视频片段循环预览"
+                    autoPlay
+                    className="upload-video-preview segment-video-preview"
+                    controls
+                    muted
+                    playsInline
+                    src={videoUrl ?? undefined}
+                    style={cropSurfaceStyle}
+                    onEnded={(event) => {
+                      event.currentTarget.currentTime = segmentStart;
+                      void event.currentTarget.play().catch(() => undefined);
+                    }}
+                    onLoadedMetadata={(event) => {
+                      event.currentTarget.currentTime = segmentStart;
+                      void event.currentTarget.play().catch(() => undefined);
+                    }}
+                    onPlay={(event) => {
+                      const seekTime = getSegmentLoopSeekTime(
+                        event.currentTarget.currentTime,
+                        segmentStart,
+                        segmentEnd,
+                      );
+                      if (seekTime !== null) {
+                        event.currentTarget.currentTime = seekTime;
+                      }
+                    }}
+                    onTimeUpdate={(event) => {
+                      const seekTime = getSegmentLoopSeekTime(
+                        event.currentTarget.currentTime,
+                        segmentStart,
+                        segmentEnd,
+                      );
+                      if (seekTime !== null) {
+                        event.currentTarget.currentTime = seekTime;
+                        void event.currentTarget.play().catch(() => undefined);
+                      }
+                    }}
+                  />
+                  <small>
+                    播放范围：{formatTimestamp(segmentStart)} - {formatTimestamp(segmentEnd)}
+                  </small>
                 </div>
               </div>
+
+              <div className="crop-step-head">
+                <strong>3. 画面裁剪</strong>
+                <span>
+                  当前输出尺寸：{activeCropBounds?.width ?? videoMeta.width} ×{' '}
+                  {activeCropBounds?.height ?? videoMeta.height}
+                </span>
+              </div>
+
+              <div className="crop-preview-grid">
+                <div className="canvas-card">
+                  <div className="canvas-head">
+                    <div className="canvas-title">
+                      <span>鼠标框选裁剪</span>
+                      <small>在参考画面上拖拽，直接选择要保留的区域</small>
+                    </div>
+                  </div>
+                  <div className="canvas-surface crop-canvas-surface" style={cropSurfaceStyle}>
+                    {referenceRawFrame ? (
+                      <canvas
+                        ref={cropSelectionCanvasRef}
+                        className="preview-canvas crop-preview-canvas crop-selection-canvas"
+                        onPointerCancel={handleCropPointerCancel}
+                        onPointerDown={handleCropPointerDown}
+                        onPointerMove={handleCropPointerMove}
+                        onPointerUp={finishCropSelection}
+                      />
+                    ) : (
+                      <div className="crop-placeholder">视频读取后可直接鼠标框选裁剪区域</div>
+                    )}
+                  </div>
+                  <div className="canvas-footer">
+                    <span>也可以继续用下面的数值输入精确微调</span>
+                  </div>
+                </div>
+
+                <div className="canvas-card">
+                  <div className="canvas-head">
+                    <div className="canvas-title">
+                      <span>裁剪预览</span>
+                      <small>这里会实时显示当前裁剪后的输出画面</small>
+                    </div>
+                  </div>
+                  <div className="canvas-surface crop-canvas-surface" style={cropSurfaceStyle}>
+                    {referenceRawFrame ? (
+                      <canvas
+                        ref={cropPreviewCanvasRef}
+                        className="preview-canvas crop-preview-canvas"
+                      />
+                    ) : (
+                      <div className="crop-placeholder">视频读取后，这里会显示裁剪预览</div>
+                    )}
+                  </div>
+                  <div className="canvas-footer">
+                    <span>
+                      当前输出尺寸：{activeCropBounds?.width ?? videoMeta.width} ×{' '}
+                      {activeCropBounds?.height ?? videoMeta.height}
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              <div className="crop-controls-pane">
+                <div className="crop-controls-head">
+                  <strong>裁剪微调</strong>
+                  <span>继续用数值做精确裁剪</span>
+                </div>
+
+                <div className="crop-grid">
+                  <label className="field">
+                    <span>左侧偏移 (%)</span>
+                    <input
+                      min={0}
+                      max={99}
+                      type="number"
+                      value={cropLeftPercent}
+                      onChange={(event) => handleCropLeftChange(Number(event.target.value) || 0)}
+                    />
+                  </label>
+
+                  <label className="field">
+                    <span>顶部偏移 (%)</span>
+                    <input
+                      min={0}
+                      max={99}
+                      type="number"
+                      value={cropTopPercent}
+                      onChange={(event) => handleCropTopChange(Number(event.target.value) || 0)}
+                    />
+                  </label>
+
+                  <label className="field">
+                    <span>裁剪宽度 (%)</span>
+                    <input
+                      min={1}
+                      max={100 - cropLeftPercent}
+                      type="number"
+                      value={cropWidthPercent}
+                      onChange={(event) => handleCropWidthChange(Number(event.target.value) || 1)}
+                    />
+                  </label>
+
+                  <label className="field">
+                    <span>裁剪高度 (%)</span>
+                    <input
+                      min={1}
+                      max={100 - cropTopPercent}
+                      type="number"
+                      value={cropHeightPercent}
+                      onChange={(event) => handleCropHeightChange(Number(event.target.value) || 1)}
+                    />
+                  </label>
+                </div>
+
+                <div className="crop-picker__footer">
+                  <small>
+                    你可以直接鼠标框选，也可以继续用百分比数值精确裁剪。
+                  </small>
+                  <button
+                    className="ghost-button"
+                    disabled={!isCropApplied}
+                    type="button"
+                    onClick={resetCropArea}
+                  >
+                    重置裁剪
+                  </button>
+                </div>
+              </div>
+
+              <div ref={controlsPanelRef} className="workflow-action-row">
+                <div>
+                  <strong>片段与裁剪确认完成后，继续提取参考帧</strong>
+                  <span>下一步进入去水印和抠像设置。</span>
+                </div>
+                <button
+                  className="primary-button"
+                  type="button"
+                  onClick={() => {
+                    pendingChromaScrollTopRef.current = window.scrollY;
+                    setReferenceTime(firstSampleTime);
+                    setIsChromaStageOpen(true);
+                    pendingChromaScrollRef.current = true;
+                    setStatus(
+                      isCutoutMode
+                        ? '已提取参考帧，请点击背景颜色开始抠图。'
+                        : '参考帧已就绪，请先设置去水印区域，再进行抠像。'
+                    );
+                  }}
+                >
+                  {isChromaStageOpen ? '重新确认片段与裁剪' : '确认片段与裁剪并提取参考帧'}
+                </button>
+              </div>
+              {error ? <p className="error-text">{error}</p> : null}
             </div>
           </section>
         ) : null}

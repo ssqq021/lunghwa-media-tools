@@ -604,6 +604,70 @@ button {
   align-items: stretch;
 }
 
+.segment-step-grid {
+  display: grid;
+  gap: 18px;
+  grid-template-columns: minmax(0, 1fr) minmax(320px, 0.9fr);
+  align-items: stretch;
+}
+
+.segment-preview-card {
+  min-height: 0;
+  align-content: start;
+  background: #f7f8fd;
+}
+
+.segment-preview-card__head,
+.crop-step-head,
+.workflow-action-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.segment-preview-card__head strong {
+  color: #6d28d9;
+  font-size: 0.84rem;
+}
+
+.segment-video-preview {
+  max-height: 320px;
+}
+
+.segment-preview-card small,
+.crop-step-head span,
+.workflow-action-row span {
+  color: #6a7783;
+  font-size: 0.88rem;
+}
+
+.crop-step-head {
+  padding-top: 18px;
+  border-top: 1px solid rgba(113, 92, 255, 0.12);
+}
+
+.crop-step-head strong {
+  color: #132238;
+  font-size: 1.06rem;
+}
+
+.workflow-action-row {
+  padding: 16px;
+  border-radius: 18px;
+  background: rgba(237, 245, 255, 0.9);
+  border: 1px solid rgba(59, 130, 246, 0.18);
+}
+
+.workflow-action-row > div {
+  display: grid;
+  gap: 4px;
+}
+
+.workflow-action-row .primary-button {
+  flex: 0 0 auto;
+}
+
 .crop-controls-pane,
 .controls-pane {
   display: grid;
@@ -1760,6 +1824,7 @@ button {
 
   .mode-switch,
   .upload-layout--with-preview,
+  .segment-step-grid,
   .crop-controls-grid,
   .control-grid,
   .stats-grid,
@@ -1780,6 +1845,16 @@ button {
   .segment-picker__head {
     flex-direction: column;
     align-items: flex-start;
+  }
+
+  .crop-step-head,
+  .workflow-action-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .workflow-action-row .primary-button {
+    width: 100%;
   }
 
   .animation-toolbar {
