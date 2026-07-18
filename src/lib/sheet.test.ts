@@ -38,6 +38,22 @@ describe('getLayoutMetrics', () => {
     });
   });
 
+  it('recalculates rows and final PNG size when the export column count changes', () => {
+    expect(
+      getLayoutMetrics(meta, 12, {
+        ...options,
+        columns: 3,
+      }, false),
+    ).toEqual({
+      rows: 4,
+      canvasWidth: 976,
+      canvasHeight: 744,
+      frameWidth: 320,
+      frameHeight: 180,
+      labelBlockHeight: 0,
+    });
+  });
+
   it('uses a transparent appearance for transparent exports', () => {
     expect(getSheetAppearance(true)).toEqual({
       transparentBackground: true,

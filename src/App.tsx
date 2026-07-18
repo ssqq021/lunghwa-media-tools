@@ -3384,7 +3384,7 @@ function App() {
             </div>
 
             <p className="download-copy">
-              支持导出序列图 PNG、动画 GIF、透明帧 ZIP 和 Spine ZIP；修改导出参数后会自动刷新当前序列图预览。
+              支持导出序列图 PNG、动画 GIF、透明帧 ZIP 和 Spine ZIP；修改导出列数、间距或单帧尺寸后，下方会自动刷新最终 PNG 排布预览。
             </p>
 
             <div className="export-config-grid">
@@ -3436,6 +3436,41 @@ function App() {
                 </small>
               </div>
             </div>
+
+            {result ? (
+              <div className="export-preview-card" aria-live="polite">
+                <div className="export-preview-card__head">
+                  <div>
+                    <strong>最终 PNG 排布预览</strong>
+                    <span>这里显示的就是下载序列图 PNG 时的实际排列。</span>
+                  </div>
+                  <div className="export-preview-card__badge">
+                    {columns} 列 × {exportLayoutMetrics?.rows ?? 0} 行
+                  </div>
+                </div>
+
+                <div
+                  className={`preview-wrap export-preview-card__canvas ${
+                    resultTransparent ? 'preview-wrap--transparent' : 'preview-wrap--solid'
+                  }`}
+                >
+                  <img
+                    alt={`最终 PNG 排布预览：${columns} 列`}
+                    className="preview-image"
+                    src={result.objectUrl}
+                  />
+                </div>
+
+                <div className="export-preview-card__meta">
+                  <span>
+                    {selectedFrameCount} 帧 · {columns} 列 · {exportLayoutMetrics?.rows ?? 0} 行
+                  </span>
+                  <strong>
+                    {result.outputWidth} × {result.outputHeight} PNG
+                  </strong>
+                </div>
+              </div>
+            ) : null}
 
             <div className="export-actions">
               <button
