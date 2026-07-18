@@ -1648,6 +1648,12 @@ button {
   max-height: 560px;
 }
 
+.export-preview-card__image {
+  width: auto;
+  height: auto;
+  max-width: none;
+}
+
 .export-actions {
   display: grid;
   gap: 12px;

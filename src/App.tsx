@@ -3442,7 +3442,7 @@ function App() {
                 <div className="export-preview-card__head">
                   <div>
                     <strong>最终 PNG 排布预览</strong>
-                    <span>这里显示的就是下载序列图 PNG 时的实际排列。</span>
+                    <span>按 1:1 像素显示；大图可横向、纵向滚动查看。</span>
                   </div>
                   <div className="export-preview-card__badge">
                     {columns} 列 × {exportLayoutMetrics?.rows ?? 0} 行
@@ -3456,8 +3456,10 @@ function App() {
                 >
                   <img
                     alt={`最终 PNG 排布预览：${columns} 列`}
-                    className="preview-image"
+                    className="preview-image export-preview-card__image"
+                    height={result.outputHeight}
                     src={result.objectUrl}
+                    width={result.outputWidth}
                   />
                 </div>
 
