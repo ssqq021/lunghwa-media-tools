@@ -72,6 +72,7 @@ import {
 import ImageCutoutTool from './ImageCutoutTool';
 import ImageResizeTool from './ImageResizeTool';
 import ImageCompressTool from './ImageCompressTool';
+import UiLayerTool from './UiLayerTool';
 
 const DEFAULT_FRAMES_PER_SECOND = 12;
 const DEFAULT_COLUMNS = 4;
@@ -114,7 +115,7 @@ type ResultPreviewMode = 'sheet' | 'animation';
 type SpinePreviewMode = 'animation';
 
 type ExportPresetValue = (typeof EXPORT_PRESETS)[number]['value'];
-type AppMode = 'sheet' | 'cutout' | 'resize' | 'compress';
+type AppMode = 'sheet' | 'cutout' | 'resize' | 'compress' | 'ui-layer';
 
 type DragSelection = {
   start: SamplePoint;
@@ -750,6 +751,8 @@ function App() {
   const isCutoutMode = appMode === 'cutout';
   const isResizeMode = appMode === 'resize';
   const isCompressMode = appMode === 'compress';
+  const isUiLayerMode = appMode === 'ui-layer';
+  const isSheetMode = appMode === 'sheet';
   const canGenerate = Boolean(
     videoMeta &&
       videoUrl &&
@@ -759,9 +762,9 @@ function App() {
       !frameLimitExceeded,
   );
   const showChromaStage = Boolean(videoMeta && isChromaStageOpen);
-  const showFramePickerStage = Boolean(!isCutoutMode && extractedFrames?.length);
+  const showFramePickerStage = Boolean(isSheetMode && extractedFrames?.length);
   const showResultStage = Boolean(result);
-  const showSpineStage = Boolean(!isCutoutMode && spineDraft);
+  const showSpineStage = Boolean(isSheetMode && spineDraft);
   const animationFrames = useMemo<ExtractedFrame[]>(() => {
     if (filteredAssets?.processed) {
       return toTransparentSheetFrames(filteredAssets.processed);
@@ -2314,6 +2317,8 @@ function App() {
           ? '已切换到图片尺寸工具，请上传图片并设置目标尺寸。'
           : nextMode === 'compress'
             ? '已切换到图片压缩工具，请上传图片并设置压缩参数。'
+            : nextMode === 'ui-layer'
+              ? '已切换到 UI 拆图工具，请先连接本地 AI 服务。'
             : '已切换回视频转序列帧表。'
     );
   }
@@ -2333,17 +2338,19 @@ function App() {
                   ? '图片尺寸工具'
                   : isCompressMode
                     ? '图片压缩工具'
+                    : isUiLayerMode
+                      ? 'UI拆图工具'
                     : '视频转序列帧表'}
             </span>
             <span className="hero-title__version">
-              {isCutoutMode || isResizeMode || isCompressMode ? '1.0' : '2.0'}
+              {isSheetMode ? '2.0' : '1.0'}
             </span>
           </h1>
           <div className="hero-tool-row">
             <p className="hero-tool-copy">{'\u66F4\u591A\u5DE5\u5177\uFF1A'}</p>
             <div className="hero-links">
               <button
-                className={`hero-link hero-link--button ${!isCutoutMode && !isResizeMode && !isCompressMode ? 'is-active' : ''}`}
+                className={`hero-link hero-link--button ${isSheetMode ? 'is-active' : ''}`}
                 type="button"
                 onClick={() => switchAppMode('sheet')}
               >
@@ -2370,6 +2377,13 @@ function App() {
               >
                 图片压缩工具
               </button>
+              <button
+                className={`hero-link hero-link--button ${isUiLayerMode ? 'is-active' : ''}`}
+                type="button"
+                onClick={() => switchAppMode('ui-layer')}
+              >
+                UI拆图
+              </button>
             </div>
           </div>
         </section>
@@ -2382,6 +2396,8 @@ function App() {
           <ImageResizeTool onStatusChange={setStatus} />
         ) : isCompressMode ? (
           <ImageCompressTool onStatusChange={setStatus} />
+        ) : isUiLayerMode ? (
+          <UiLayerTool onStatusChange={setStatus} />
         ) : (
         <section className="workspace-grid workspace-grid--single">
           <div className="panel upload-panel">
@@ -2440,7 +2456,7 @@ function App() {
         </section>
         )}
 
-        {!isCutoutMode && videoMeta ? (
+        {isSheetMode && videoMeta ? (
           <section ref={cropPanelRef} className="crop-row">
             <div className="crop-picker crop-picker--row">
               <div className="segment-step-grid">
@@ -2701,7 +2717,7 @@ function App() {
                     setIsChromaStageOpen(true);
                     pendingChromaScrollRef.current = true;
                     setStatus(
-                      isCutoutMode
+                      !isSheetMode
                         ? '已提取参考帧，请点击背景颜色开始抠图。'
                         : '参考帧已就绪，请先设置去水印区域，再进行抠像。'
                     );
@@ -2715,7 +2731,7 @@ function App() {
           </section>
         ) : null}
 
-        {!isCutoutMode && showChromaStage ? (
+        {isSheetMode && showChromaStage ? (
         <section ref={chromaPanelRef} className="panel frame-picker-panel">
           <div className="panel-head panel-head--stack">
             <div>
@@ -2874,7 +2890,7 @@ function App() {
         </section>
         ) : null}
 
-        {!isCutoutMode && showChromaStage ? (
+        {isSheetMode && showChromaStage ? (
         <section className="panel chroma-panel">
           <div className="panel-head panel-head--stack">
             <div>
@@ -3152,7 +3168,7 @@ function App() {
         </section>
         ) : null}
 
-        {!isCutoutMode && showChromaStage ? (
+        {isSheetMode && showChromaStage ? (
         <section ref={resultPanelRef} className="panel frame-picker-panel">
           <div className="panel-head panel-head--stack">
             <div>
@@ -3375,7 +3391,7 @@ function App() {
         </section>
         ) : null}
 
-        {!isCutoutMode && showResultStage ? (
+        {isSheetMode && showResultStage ? (
         <section className="result-grid result-grid--single">
           <div className="panel download-panel">
             <div className="panel-head">
