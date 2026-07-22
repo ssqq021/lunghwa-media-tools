@@ -402,6 +402,7 @@ let spineAnimationId = 0;
 function createSpineAnimationClip(
   frameCount: number,
   index: number,
+  fps: number,
 ): SpineAnimationClip {
   spineAnimationId += 1;
   return {
@@ -409,6 +410,7 @@ function createSpineAnimationClip(
     name: index === 0 ? 'idle' : `animation-${index + 1}`,
     startFrame: 0,
     endFrame: Math.max(frameCount - 1, 0),
+    fps,
   };
 }
 
@@ -476,7 +478,6 @@ function App() {
   const [spineOptions, setSpineOptions] = useState<SpineExportOptions>({
     skeletonName: 'video',
     slotName: 'sprite',
-    fps: DEFAULT_FRAMES_PER_SECOND,
     animations: [],
   });
   const [activeSpineAnimationId, setActiveSpineAnimationId] = useState<string | null>(null);
@@ -1367,7 +1368,7 @@ function App() {
       return;
     }
 
-    const playbackFps = Math.min(Math.max(spineOptions.fps, 1), 60);
+    const playbackFps = Math.min(Math.max(activeSpineAnimation?.fps ?? DEFAULT_FRAMES_PER_SECOND, 1), 60);
     const interval = window.setInterval(() => {
       setSpineAnimationFrameIndex((current) => {
         if (current >= spinePreviewEndFrame) return spinePreviewStartFrame;
@@ -1382,7 +1383,7 @@ function App() {
   }, [
     spineAnimationPlaying,
     spineFrames.length,
-    spineOptions.fps,
+    activeSpineAnimation?.fps,
     spinePreviewEndFrame,
     spinePreviewMode,
     spinePreviewStartFrame,
@@ -1807,11 +1808,10 @@ function App() {
       pendingSpineScrollTopRef.current = window.scrollY;
       pendingSpineScrollRef.current = true;
       setSpineDraft(nextDraft);
-      const firstAnimation = createSpineAnimationClip(nextDraft.frames.length, 0);
+      const firstAnimation = createSpineAnimationClip(nextDraft.frames.length, 0, framesPerSecond);
       setSpineOptions({
         skeletonName: baseFileName,
         slotName: 'sprite',
-        fps: framesPerSecond,
         animations: [firstAnimation],
       });
       setActiveSpineAnimationId(firstAnimation.id);
@@ -1845,7 +1845,11 @@ function App() {
   }
 
   function addSpineAnimation(): void {
-    const clip = createSpineAnimationClip(spineFrames.length, spineOptions.animations.length);
+    const clip = createSpineAnimationClip(
+      spineFrames.length,
+      spineOptions.animations.length,
+      activeSpineAnimation?.fps ?? framesPerSecond,
+    );
     setSpineOptions((current) => ({
       ...current,
       animations: [...current.animations, clip],
@@ -3730,7 +3734,7 @@ function App() {
                 <small>
                   {activeSpineAnimation
                     ? `第 ${spinePreviewStartFrame + 1}–${spinePreviewEndFrame + 1} 帧 · 循环预览`
-                    : `${spineDraft.baseName} · ${spineOptions.fps} FPS`}
+                    : spineDraft.baseName}
                 </small>
               </div>
 
@@ -3753,7 +3757,7 @@ function App() {
                   </strong>
                   <span>
                     {spineFrames[spineAnimationFrameIndex]
-                      ? `${spineFrames[spineAnimationFrameIndex].label} · ${spineOptions.fps} FPS 预览`
+                      ? `${spineFrames[spineAnimationFrameIndex].label} · ${activeSpineAnimation?.fps ?? DEFAULT_FRAMES_PER_SECOND} FPS 预览`
                       : '等待 Spine 预览帧'}
                   </span>
                 </div>
@@ -3814,22 +3818,6 @@ function App() {
                       setSpineOptions((current) => ({
                         ...current,
                         slotName: event.target.value || 'sprite',
-                      }))
-                    }
-                  />
-                </label>
-
-                <label className="field">
-                  <span>导出 FPS</span>
-                  <input
-                    min={1}
-                    max={60}
-                    type="number"
-                    value={spineOptions.fps}
-                    onChange={(event) =>
-                      setSpineOptions((current) => ({
-                        ...current,
-                        fps: Math.min(Math.max(Number(event.target.value) || 1, 1), 60),
                       }))
                     }
                   />
@@ -3908,6 +3896,18 @@ function App() {
                               Math.min((Number(event.target.value) || 1) - 1, spineFrames.length - 1),
                               activeSpineAnimation.startFrame,
                             ),
+                          })}
+                        />
+                      </label>
+                      <label className="field">
+                        <span>此动作 FPS</span>
+                        <input
+                          min={1}
+                          max={60}
+                          type="number"
+                          value={activeSpineAnimation.fps}
+                          onChange={(event) => updateSpineAnimation(activeSpineAnimation.id, {
+                            fps: Math.min(Math.max(Number(event.target.value) || 1, 1), 60),
                           })}
                         />
                       </label>

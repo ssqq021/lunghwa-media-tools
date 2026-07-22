@@ -36,10 +36,9 @@ const draft: SpineDraft = {
 const options: SpineExportOptions = {
   skeletonName: 'demo',
   slotName: 'sprite',
-  fps: 12,
   animations: [
-    { id: 'idle', name: 'idle', startFrame: 0, endFrame: 0 },
-    { id: 'attack', name: 'attack', startFrame: 2, endFrame: 2 },
+    { id: 'idle', name: 'idle', startFrame: 0, endFrame: 0, fps: 12 },
+    { id: 'attack', name: 'attack', startFrame: 2, endFrame: 2, fps: 24 },
   ],
 };
 
@@ -88,14 +87,13 @@ describe('spine bundle helpers', () => {
       coordinateOrigin: 'top-left',
       columns: 2,
       gap: 8,
-      fps: 12,
       frames: [
-        { name: 'demo-clip-spine-001', sourceFrame: 0, x: 0, y: 0, width: 64, height: 64, time: 0 },
-        { name: 'demo-clip-spine-003', sourceFrame: 2, x: 72, y: 0, width: 64, height: 64, time: 0.166667 },
+        { name: 'demo-clip-spine-001', sourceFrame: 0, x: 0, y: 0, width: 64, height: 64 },
+        { name: 'demo-clip-spine-003', sourceFrame: 2, x: 72, y: 0, width: 64, height: 64 },
       ],
       animations: [
-        { name: 'idle', startFrame: 0, endFrame: 0, loop: true, frames: ['demo-clip-spine-001'] },
-        { name: 'attack', startFrame: 2, endFrame: 2, loop: true, frames: ['demo-clip-spine-003'] },
+        { name: 'idle', startFrame: 0, endFrame: 0, loop: true, fps: 12, frames: ['demo-clip-spine-001'] },
+        { name: 'attack', startFrame: 2, endFrame: 2, loop: true, fps: 24, frames: ['demo-clip-spine-003'] },
       ],
     });
   });
@@ -106,15 +104,15 @@ describe('spine bundle helpers', () => {
     expect(readme).toContain('Spine / Unity 图集动画导出说明');
     expect(readme).toContain('demo-clip-spine.png');
     expect(readme).toContain('frames: 2 / 3（已省略未使用帧）');
-    expect(readme).toContain('idle: 1-1 帧（循环预览）');
+    expect(readme).toContain('idle: 1-1 帧 · 12 FPS（循环预览）');
   });
 
   it('rejects duplicate action names before exporting', () => {
     expect(() => buildSpineSkeletonData(draft, {
       ...options,
       animations: [
-        { id: 'first', name: 'idle', startFrame: 0, endFrame: 0 },
-        { id: 'second', name: 'idle', startFrame: 2, endFrame: 2 },
+        { id: 'first', name: 'idle', startFrame: 0, endFrame: 0, fps: 12 },
+        { id: 'second', name: 'idle', startFrame: 2, endFrame: 2, fps: 12 },
       ],
     }, atlas)).toThrow('重复');
   });

@@ -53,7 +53,6 @@ type UnitySpriteManifest = {
   coordinateOrigin: 'top-left';
   columns: number;
   gap: number;
-  fps: number;
   frames: Array<{
     name: string;
     sourceFrame: number;
@@ -61,13 +60,13 @@ type UnitySpriteManifest = {
     y: number;
     width: number;
     height: number;
-    time: number;
   }>;
   animations: Array<{
     name: string;
     startFrame: number;
     endFrame: number;
     loop: true;
+    fps: number;
     frames: string[];
   }>;
 };
@@ -164,7 +163,6 @@ export function buildSpineReadme(draft: SpineDraft, options: SpineExportOptions)
     '当前导出参数：',
     `- skeleton: ${options.skeletonName}`,
     `- slot: ${options.slotName}`,
-    `- fps: ${options.fps}`,
     `- frames: ${draft.frames.length} / ${draft.sourceFrameCount}（已省略未使用帧）`,
     `- columns: ${draft.sheetOptions.columns}`,
     `- gap: ${draft.sheetOptions.gap}`,
@@ -173,7 +171,7 @@ export function buildSpineReadme(draft: SpineDraft, options: SpineExportOptions)
     '动作分段：',
     ...options.animations.map((clip) => {
       const range = getClipRange(clip, draft.sourceFrameCount);
-      return `- ${clip.name}: ${range.startFrame + 1}-${range.endFrame + 1} 帧（循环预览）`;
+      return `- ${clip.name}: ${range.startFrame + 1}-${range.endFrame + 1} 帧 · ${clip.fps} FPS（循环预览）`;
     }),
   ].join('\n');
 }
@@ -214,7 +212,7 @@ export function buildSpineSkeletonData(
           [options.slotName]: {
             attachment: frameIndexes.map((frameIndex, offset) => {
               return {
-                time: Number((offset / Math.max(options.fps, 1)).toFixed(6)),
+                time: Number((offset / Math.max(clip.fps, 1)).toFixed(6)),
                 name: getSpineFrameStem(draft.baseName, getSourceFrameIndex(draft, frameIndex)),
               };
             }),
@@ -296,20 +294,19 @@ export function buildUnitySpriteManifest(
     coordinateOrigin: 'top-left',
     columns: draft.sheetOptions.columns,
     gap: draft.sheetOptions.gap,
-    fps: options.fps,
     frames: draft.frames.map((_, index) => {
       const rect = getFrameRect(atlas, index);
       return {
         name: getSpineFrameStem(draft.baseName, getSourceFrameIndex(draft, index)),
         sourceFrame: getSourceFrameIndex(draft, index),
         ...rect,
-        time: Number((getSourceFrameIndex(draft, index) / Math.max(options.fps, 1)).toFixed(6)),
       };
     }),
     animations: options.animations.map((clip) => ({
       name: clip.name.trim(),
       ...getClipRange(clip, draft.sourceFrameCount),
       loop: true,
+      fps: clip.fps,
       frames: getClipFrameIndexes(draft, clip).map((index) => (
         getSpineFrameStem(draft.baseName, getSourceFrameIndex(draft, index))
       )),
