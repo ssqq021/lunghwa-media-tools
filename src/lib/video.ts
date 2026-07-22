@@ -252,6 +252,37 @@ export function cropCanvas(
   return canvas;
 }
 
+export function getResizeDimensions(
+  sourceWidth: number,
+  sourceHeight: number,
+  width?: number | null,
+  height?: number | null,
+): { width: number; height: number } {
+  return {
+    width: Math.max(1, Math.round(width ?? sourceWidth)),
+    height: Math.max(1, Math.round(height ?? sourceHeight)),
+  };
+}
+
+export function resizeCanvas(source: HTMLCanvasElement, width?: number | null, height?: number | null): HTMLCanvasElement {
+  const { width: targetWidth, height: targetHeight } = getResizeDimensions(
+    source.width,
+    source.height,
+    width,
+    height,
+  );
+  if (targetWidth === source.width && targetHeight === source.height) return source;
+  const canvas = document.createElement('canvas');
+  canvas.width = targetWidth;
+  canvas.height = targetHeight;
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('当前浏览器无法创建 Canvas 绘图上下文。');
+  context.imageSmoothingEnabled = true;
+  context.imageSmoothingQuality = 'high';
+  context.drawImage(source, 0, 0, targetWidth, targetHeight);
+  return canvas;
+}
+
 export function getSampleTimes(
   duration: number,
   framesPerSecond: number,
@@ -318,8 +349,9 @@ export async function extractFrames(
     for (const [index, time] of sampleTimes.entries()) {
       const image = await reader.captureFrameAt(time);
       const croppedImage = cropCanvas(image, options.cropArea);
+      const outputImage = resizeCanvas(croppedImage, options.resizeWidth, options.resizeHeight);
       frames.push({
-        image: croppedImage,
+        image: outputImage,
         time,
         label: formatTimestamp(time),
       });

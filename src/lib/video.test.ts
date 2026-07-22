@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   getCropBounds,
+  getResizeDimensions,
   getSampleTimes,
   getSegmentLoopSeekTime,
   normalizeCropArea,
@@ -86,5 +87,15 @@ describe('getCropBounds', () => {
       width: 960,
       height: 540,
     });
+  });
+});
+
+describe('getResizeDimensions', () => {
+  it('changes output resolution without changing crop coordinates', () => {
+    expect(getResizeDimensions(960, 540, 512, 288)).toEqual({ width: 512, height: 288 });
+  });
+
+  it('keeps the source dimensions when no image-size override is set', () => {
+    expect(getResizeDimensions(960, 540)).toEqual({ width: 960, height: 540 });
   });
 });

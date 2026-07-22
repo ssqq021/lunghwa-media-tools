@@ -61,6 +61,7 @@ import {
   loadVideoAsset,
   normalizeCropArea,
   revokeVideoAsset,
+  resizeCanvas,
   type VideoFrameReader,
 } from './lib/video';
 import {
@@ -416,6 +417,9 @@ function App() {
   const [cropTopPercent, setCropTopPercent] = useState(DEFAULT_CROP_TOP_PERCENT);
   const [cropWidthPercent, setCropWidthPercent] = useState(DEFAULT_CROP_WIDTH_PERCENT);
   const [cropHeightPercent, setCropHeightPercent] = useState(DEFAULT_CROP_HEIGHT_PERCENT);
+  const [resizeWidth, setResizeWidth] = useState<number | null>(null);
+  const [resizeHeight, setResizeHeight] = useState<number | null>(null);
+  const [resizeLocked, setResizeLocked] = useState(true);
   const [dragSelection, setDragSelection] = useState<DragSelection | null>(null);
   const [watermarkDragSelection, setWatermarkDragSelection] = useState<DragSelection | null>(null);
   const [watermarkRect, setWatermarkRect] = useState<CropBounds | null>(null);
@@ -560,13 +564,6 @@ function App() {
         : cropArea,
     [cropArea, dragSelection, referenceRawFrame],
   );
-  const activeCropBounds = useMemo(
-    () =>
-      videoMeta
-        ? getCropBounds(videoMeta.width, videoMeta.height, activeCropArea)
-        : null,
-    [activeCropArea, videoMeta],
-  );
   const cropSurfaceStyle = useMemo<CSSProperties | undefined>(
     () =>
       videoMeta
@@ -591,10 +588,10 @@ function App() {
 
     return {
       ...videoMeta,
-      width: cropBounds.width,
-      height: cropBounds.height,
+      width: resizeWidth ?? cropBounds.width,
+      height: resizeHeight ?? cropBounds.height,
     };
-  }, [cropBounds, videoMeta]);
+  }, [cropBounds, resizeHeight, resizeWidth, videoMeta]);
   const exportFrameSize = useMemo(
     () => EXPORT_PRESETS.find((preset) => preset.value === exportPreset)?.frameSize,
     [exportPreset],
@@ -997,7 +994,7 @@ function App() {
     }
 
     try {
-      const cropped = cropCanvas(referenceRawFrame, cropArea);
+      const cropped = resizeCanvas(cropCanvas(referenceRawFrame, cropArea), resizeWidth, resizeHeight);
       setReferenceFrame(cropped);
       setSamplePoint((current) => {
         if (!current) {
@@ -1013,7 +1010,7 @@ function App() {
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : '参考帧裁剪失败。');
     }
-  }, [cropArea, referenceRawFrame]);
+  }, [cropArea, referenceRawFrame, resizeHeight, resizeWidth]);
 
   useEffect(() => {
     if (!videoMeta) {
@@ -1429,6 +1426,8 @@ function App() {
     cropArea.leftPercent,
     cropArea.topPercent,
     cropArea.widthPercent,
+    resizeHeight,
+    resizeWidth,
     videoUrl,
   ]);
 
@@ -1446,6 +1445,8 @@ function App() {
     setCropTopPercent(DEFAULT_CROP_TOP_PERCENT);
     setCropWidthPercent(DEFAULT_CROP_WIDTH_PERCENT);
     setCropHeightPercent(DEFAULT_CROP_HEIGHT_PERCENT);
+    setResizeWidth(null);
+    setResizeHeight(null);
     setSamplePoint(null);
     setColorSample(null);
     setCommittedColorKeys([]);
@@ -1560,6 +1561,8 @@ function App() {
           segmentStart,
           segmentEnd,
           cropArea,
+          resizeWidth,
+          resizeHeight,
         },
         (current, total) => {
           setStatus(`正在抽取序列帧 ${current}/${total}...`);
@@ -1908,6 +1911,22 @@ function App() {
     }
 
     setDragSelection(null);
+  }
+
+  function handleResizeWidthChange(value: number): void {
+    const width = Math.min(8192, Math.max(1, Math.round(value)));
+    setResizeWidth(width);
+    if (resizeLocked && cropBounds) {
+      setResizeHeight(Math.max(1, Math.round((width * cropBounds.height) / cropBounds.width)));
+    }
+  }
+
+  function handleResizeHeightChange(value: number): void {
+    const height = Math.min(8192, Math.max(1, Math.round(value)));
+    setResizeHeight(height);
+    if (resizeLocked && cropBounds) {
+      setResizeWidth(Math.max(1, Math.round((height * cropBounds.width) / cropBounds.height)));
+    }
   }
 
   function paintProtectionMaskToPoint(point: MaskPoint): void {
@@ -2564,8 +2583,8 @@ function App() {
               <div className="crop-step-head">
                 <strong>3. 画面裁剪</strong>
                 <span>
-                  当前输出尺寸：{activeCropBounds?.width ?? videoMeta.width} ×{' '}
-                  {activeCropBounds?.height ?? videoMeta.height}
+                  最终输出尺寸：{outputVideoMeta?.width ?? videoMeta.width} ×{' '}
+                  {outputVideoMeta?.height ?? videoMeta.height}
                 </span>
               </div>
 
@@ -2615,8 +2634,8 @@ function App() {
                   </div>
                   <div className="canvas-footer">
                     <span>
-                      当前输出尺寸：{activeCropBounds?.width ?? videoMeta.width} ×{' '}
-                      {activeCropBounds?.height ?? videoMeta.height}
+                      最终输出尺寸：{outputVideoMeta?.width ?? videoMeta.width} ×{' '}
+                      {outputVideoMeta?.height ?? videoMeta.height}
                     </span>
                   </div>
                 </div>
@@ -2672,6 +2691,57 @@ function App() {
                       onChange={(event) => handleCropHeightChange(Number(event.target.value) || 1)}
                     />
                   </label>
+                </div>
+
+                <div className="crop-controls-head">
+                  <strong>图像大小（不裁剪）</strong>
+                  <span>类似 Photoshop 的图像大小：只缩放分辨率，不改变画面内容。</span>
+                </div>
+
+                <div className="crop-grid">
+                  <label className="field">
+                    <span>输出宽度（px）</span>
+                    <input
+                      min={1}
+                      max={8192}
+                      type="number"
+                      value={resizeWidth ?? cropBounds?.width ?? videoMeta.width}
+                      onChange={(event) => handleResizeWidthChange(Number(event.target.value) || 1)}
+                    />
+                  </label>
+
+                  <label className="field">
+                    <span>输出高度（px）</span>
+                    <input
+                      min={1}
+                      max={8192}
+                      type="number"
+                      value={resizeHeight ?? cropBounds?.height ?? videoMeta.height}
+                      onChange={(event) => handleResizeHeightChange(Number(event.target.value) || 1)}
+                    />
+                  </label>
+                </div>
+
+                <div className="crop-picker__footer">
+                  <label className="toggle-card">
+                    <input
+                      checked={resizeLocked}
+                      type="checkbox"
+                      onChange={(event) => setResizeLocked(event.target.checked)}
+                    />
+                    <span>锁定比例</span>
+                  </label>
+                  <button
+                    className="ghost-button"
+                    disabled={resizeWidth === null && resizeHeight === null}
+                    type="button"
+                    onClick={() => {
+                      setResizeWidth(null);
+                      setResizeHeight(null);
+                    }}
+                  >
+                    恢复裁剪后原尺寸
+                  </button>
                 </div>
 
                 <div className="crop-picker__footer">

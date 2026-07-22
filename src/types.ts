@@ -44,6 +44,8 @@ export type ExtractionOptions = {
   segmentStart: number;
   segmentEnd: number;
   cropArea?: CropArea | null;
+  resizeWidth?: number | null;
+  resizeHeight?: number | null;
 };
 
 export type SheetOptions = {
