@@ -392,6 +392,8 @@ function buildSpineDraftFromAssets(
     height,
     transparent,
     sheetOptions,
+    sourceFrameIndices: Array.from({ length: frames.length }, (_, index) => index),
+    sourceFrameCount: frames.length,
   };
 }
 
@@ -407,8 +409,22 @@ function createSpineAnimationClip(
     name: index === 0 ? 'idle' : `animation-${index + 1}`,
     startFrame: 0,
     endFrame: Math.max(frameCount - 1, 0),
-    loop: index === 0,
   };
+}
+
+function getUsedSpineFrameIndices(
+  clips: SpineAnimationClip[],
+  frameCount: number,
+): number[] {
+  const used = new Set<number>();
+  for (const clip of clips) {
+    const start = Math.min(Math.max(clip.startFrame, 0), Math.max(frameCount - 1, 0));
+    const end = Math.min(Math.max(clip.endFrame, start), Math.max(frameCount - 1, 0));
+    for (let index = start; index <= end; index += 1) {
+      used.add(index);
+    }
+  }
+  return [...used].sort((left, right) => left - right);
 }
 
 function App() {
@@ -1354,14 +1370,7 @@ function App() {
     const playbackFps = Math.min(Math.max(spineOptions.fps, 1), 60);
     const interval = window.setInterval(() => {
       setSpineAnimationFrameIndex((current) => {
-        if (current >= spinePreviewEndFrame) {
-          if (activeSpineAnimation?.loop) {
-            return spinePreviewStartFrame;
-          }
-          window.clearInterval(interval);
-          setSpineAnimationPlaying(false);
-          return current;
-        }
+        if (current >= spinePreviewEndFrame) return spinePreviewStartFrame;
 
         return current + 1;
       });
@@ -1371,7 +1380,6 @@ function App() {
       window.clearInterval(interval);
     };
   }, [
-    activeSpineAnimation?.loop,
     spineAnimationPlaying,
     spineFrames.length,
     spineOptions.fps,
@@ -1867,7 +1875,19 @@ function App() {
       setError(null);
       setIsRendering(true);
       setStatus('正在按第 7 步排布生成单张 Spine 图集 PNG + JSON ZIP...');
-      const exportDraft = { ...spineDraft, sheetOptions };
+      const usedFrameIndices = getUsedSpineFrameIndices(
+        spineOptions.animations,
+        spineDraft.sourceFrameCount,
+      );
+      if (!usedFrameIndices.length) {
+        throw new Error('请至少为一个动作设置可用帧范围。');
+      }
+      const exportDraft = {
+        ...spineDraft,
+        sheetOptions,
+        frames: usedFrameIndices.map((index) => spineDraft.frames[index]),
+        sourceFrameIndices: usedFrameIndices,
+      };
       const atlas = await renderFrameSheet(
         exportDraft.frames,
         {
@@ -3709,7 +3729,7 @@ function App() {
                 <strong>{spinePreviewFrameCount} 帧</strong>
                 <small>
                   {activeSpineAnimation
-                    ? `第 ${spinePreviewStartFrame + 1}–${spinePreviewEndFrame + 1} 帧 · ${activeSpineAnimation.loop ? '循环' : '播放一次'}`
+                    ? `第 ${spinePreviewStartFrame + 1}–${spinePreviewEndFrame + 1} 帧 · 循环预览`
                     : `${spineDraft.baseName} · ${spineOptions.fps} FPS`}
                 </small>
               </div>
@@ -3834,7 +3854,7 @@ function App() {
                       >
                         <button type="button" onClick={() => selectSpineAnimation(clip)}>
                           <strong>{clip.name || '未命名动作'}</strong>
-                          <span>第 {clip.startFrame + 1}–{clip.endFrame + 1} 帧 · {clip.loop ? '循环' : '一次'}</span>
+                          <span>第 {clip.startFrame + 1}–{clip.endFrame + 1} 帧 · 循环预览</span>
                         </button>
                         <button
                           aria-label={`删除动作 ${clip.name}`}
@@ -3890,16 +3910,6 @@ function App() {
                             ),
                           })}
                         />
-                      </label>
-                      <label className="toggle-card">
-                        <input
-                          checked={activeSpineAnimation.loop}
-                          type="checkbox"
-                          onChange={(event) => updateSpineAnimation(activeSpineAnimation.id, {
-                            loop: event.target.checked,
-                          })}
-                        />
-                        <span>循环预览与导出</span>
                       </label>
                     </div>
                   ) : null}

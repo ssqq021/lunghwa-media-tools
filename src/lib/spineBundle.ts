@@ -56,6 +56,7 @@ type UnitySpriteManifest = {
   fps: number;
   frames: Array<{
     name: string;
+    sourceFrame: number;
     x: number;
     y: number;
     width: number;
@@ -66,7 +67,8 @@ type UnitySpriteManifest = {
     name: string;
     startFrame: number;
     endFrame: number;
-    loop: boolean;
+    loop: true;
+    frames: string[];
   }>;
 };
 
@@ -84,11 +86,11 @@ export function getSpineFrameStem(baseName: string, index: number): string {
 }
 
 export function getSpineAtlasFileName(baseName: string): string {
-  return `images/${getBaseFileName(baseName)}-spine.png`;
+  return `${getBaseFileName(baseName)}-spine.png`;
 }
 
 export function getSpineAtlasDescriptorFileName(baseName: string): string {
-  return `images/${getBaseFileName(baseName)}-spine.atlas.txt`;
+  return `${getBaseFileName(baseName)}-spine.atlas.txt`;
 }
 
 export function getUnitySpriteManifestFileName(baseName: string): string {
@@ -107,6 +109,25 @@ function getClipRange(clip: SpineAnimationClip, frameCount: number): { startFram
   const startFrame = Math.min(Math.max(clip.startFrame, 0), Math.max(frameCount - 1, 0));
   const endFrame = Math.min(Math.max(clip.endFrame, startFrame), Math.max(frameCount - 1, 0));
   return { startFrame, endFrame };
+}
+
+function getSourceFrameIndex(draft: SpineDraft, index: number): number {
+  const sourceFrameIndex = draft.sourceFrameIndices[index];
+  if (sourceFrameIndex === undefined) {
+    throw new Error('图集帧索引不完整，请重新生成后再导出。');
+  }
+  return sourceFrameIndex;
+}
+
+function getClipFrameIndexes(draft: SpineDraft, clip: SpineAnimationClip): number[] {
+  const { startFrame, endFrame } = getClipRange(clip, draft.sourceFrameCount);
+  const indexes = draft.sourceFrameIndices.flatMap((sourceFrameIndex, index) => (
+    sourceFrameIndex >= startFrame && sourceFrameIndex <= endFrame ? [index] : []
+  ));
+  if (!indexes.length) {
+    throw new Error(`动作“${clip.name}”没有可导出的帧。`);
+  }
+  return indexes;
 }
 
 function validateAnimationClips(clips: SpineAnimationClip[]): void {
@@ -137,22 +158,22 @@ export function buildSpineReadme(draft: SpineDraft, options: SpineExportOptions)
     `- ${getSpineAtlasDescriptorFileName(draft.baseName)}（Spine 图集描述）`,
     `- ${getUnitySpriteManifestFileName(draft.baseName)}（Unity 切片坐标与帧时间）`,
     '',
-    'Spine：保持 JSON、PNG 和 atlas.txt 的相对目录不变后导入。',
+    'Spine：保持 JSON、PNG 和 atlas.txt 在同一目录后导入。',
     'Unity：将 PNG 作为一张 Sprite Sheet 使用；unity-sprites.json 的坐标原点为左上角，记录了每帧矩形与播放时间。',
     '',
     '当前导出参数：',
     `- skeleton: ${options.skeletonName}`,
     `- slot: ${options.slotName}`,
     `- fps: ${options.fps}`,
-    `- frames: ${draft.frames.length}`,
+    `- frames: ${draft.frames.length} / ${draft.sourceFrameCount}（已省略未使用帧）`,
     `- columns: ${draft.sheetOptions.columns}`,
     `- gap: ${draft.sheetOptions.gap}`,
     `- transparent: ${draft.transparent ? 'yes' : 'no'}`,
     '',
     '动作分段：',
     ...options.animations.map((clip) => {
-      const range = getClipRange(clip, draft.frames.length);
-      return `- ${clip.name}: ${range.startFrame + 1}-${range.endFrame + 1} 帧${clip.loop ? '（循环）' : ''}`;
+      const range = getClipRange(clip, draft.sourceFrameCount);
+      return `- ${clip.name}: ${range.startFrame + 1}-${range.endFrame + 1} 帧（循环预览）`;
     }),
   ].join('\n');
 }
@@ -165,7 +186,7 @@ export function buildSpineSkeletonData(
   validateAnimationClips(options.animations);
   const attachmentEntries = Object.fromEntries(
     draft.frames.map((_, index) => {
-      const attachmentName = getSpineFrameStem(draft.baseName, index);
+      const attachmentName = getSpineFrameStem(draft.baseName, getSourceFrameIndex(draft, index));
       const rect = getFrameRect(atlas, index);
       return [
         attachmentName,
@@ -182,19 +203,19 @@ export function buildSpineSkeletonData(
   );
 
   const defaultAnimation = options.animations[0];
-  const defaultFrame = defaultAnimation ? getClipRange(defaultAnimation, draft.frames.length).startFrame : 0;
+  const defaultFrameIndex = defaultAnimation ? getClipFrameIndexes(draft, defaultAnimation)[0] : 0;
+  const defaultFrame = getSourceFrameIndex(draft, defaultFrameIndex);
   const animations = Object.fromEntries(options.animations.map((clip) => {
-    const { startFrame, endFrame } = getClipRange(clip, draft.frames.length);
+    const frameIndexes = getClipFrameIndexes(draft, clip);
     return [
       clip.name.trim(),
       {
         slots: {
           [options.slotName]: {
-            attachment: Array.from({ length: endFrame - startFrame + 1 }, (_, offset) => {
-              const frameIndex = startFrame + offset;
+            attachment: frameIndexes.map((frameIndex, offset) => {
               return {
                 time: Number((offset / Math.max(options.fps, 1)).toFixed(6)),
-                name: getSpineFrameStem(draft.baseName, frameIndex),
+                name: getSpineFrameStem(draft.baseName, getSourceFrameIndex(draft, frameIndex)),
               };
             }),
           },
@@ -207,7 +228,7 @@ export function buildSpineSkeletonData(
     skeleton: {
       name: options.skeletonName,
       spine: '4.2.0',
-      images: './images/',
+      images: './',
     },
     bones: [
       {
@@ -237,12 +258,12 @@ export function buildSpineAtlasDescriptor(
   draft: SpineDraft,
   atlas: SpineAtlasExport,
 ): string {
-  const imageFileName = getSpineAtlasFileName(draft.baseName).replace('images/', '');
+  const imageFileName = getSpineAtlasFileName(draft.baseName);
   const regions = draft.frames.flatMap((_, index) => {
     const rect = getFrameRect(atlas, index);
     return [
       '',
-      getSpineFrameStem(draft.baseName, index),
+      getSpineFrameStem(draft.baseName, getSourceFrameIndex(draft, index)),
       '  rotate: false',
       `  xy: ${rect.x}, ${rect.y}`,
       `  size: ${rect.width}, ${rect.height}`,
@@ -279,15 +300,19 @@ export function buildUnitySpriteManifest(
     frames: draft.frames.map((_, index) => {
       const rect = getFrameRect(atlas, index);
       return {
-        name: getSpineFrameStem(draft.baseName, index),
+        name: getSpineFrameStem(draft.baseName, getSourceFrameIndex(draft, index)),
+        sourceFrame: getSourceFrameIndex(draft, index),
         ...rect,
-        time: Number((index / Math.max(options.fps, 1)).toFixed(6)),
+        time: Number((getSourceFrameIndex(draft, index) / Math.max(options.fps, 1)).toFixed(6)),
       };
     }),
     animations: options.animations.map((clip) => ({
       name: clip.name.trim(),
-      ...getClipRange(clip, draft.frames.length),
-      loop: clip.loop,
+      ...getClipRange(clip, draft.sourceFrameCount),
+      loop: true,
+      frames: getClipFrameIndexes(draft, clip).map((index) => (
+        getSpineFrameStem(draft.baseName, getSourceFrameIndex(draft, index))
+      )),
     })),
   };
 }
@@ -299,6 +324,9 @@ export async function buildSpineBundleZip(
 ): Promise<Blob> {
   if (atlas.frameRects.length !== draft.frames.length) {
     throw new Error('图集帧数与动画帧数不一致，请重新生成后再导出。');
+  }
+  if (draft.sourceFrameIndices.length !== draft.frames.length) {
+    throw new Error('图集帧索引与动画帧数不一致，请重新生成后再导出。');
   }
   validateAnimationClips(options.animations);
 

@@ -80,7 +80,6 @@ export type SpineAnimationClip = {
   name: string;
   startFrame: number;
   endFrame: number;
-  loop: boolean;
 };
 
 export type ExtractedFrame = {
@@ -120,6 +119,8 @@ export type SpineDraft = {
   height: number;
   transparent: boolean;
   sheetOptions: SheetOptions;
+  sourceFrameIndices: number[];
+  sourceFrameCount: number;
 };
 
 export type LayoutMetrics = {
