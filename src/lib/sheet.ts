@@ -181,6 +181,7 @@ export async function renderFrameSheet(
   sheetOptions: SheetOptions,
   includeTimestamps: boolean,
   appearance: SheetAppearance = getSheetAppearance(false),
+  trimTransparentOutput = true,
 ): Promise<RenderResult> {
   const framesForRender = cropFramesToSharedBounds(frames);
   const renderMeta = {
@@ -211,6 +212,7 @@ export async function renderFrameSheet(
 
   const contentPadding = includeTimestamps ? CARD_PADDING : 0;
   const cardHeight = metrics.frameHeight + metrics.labelBlockHeight + contentPadding * 2;
+  const frameRects: RenderResult['frameRects'] = [];
 
   for (const [index, frame] of framesForRender.entries()) {
     const scaledFrame = await resizeFrameWithPica(
@@ -222,6 +224,13 @@ export async function renderFrameSheet(
     const row = Math.floor(index / sheetOptions.columns);
     const x = column * (metrics.frameWidth + sheetOptions.gap);
     const y = row * (cardHeight + sheetOptions.gap);
+
+    frameRects.push({
+      x,
+      y: y + contentPadding,
+      width: metrics.frameWidth,
+      height: metrics.frameHeight,
+    });
 
     if (appearance.showCardBackground) {
       context.fillStyle = 'rgba(16, 24, 40, 0.08)';
@@ -253,7 +262,9 @@ export async function renderFrameSheet(
     }
   }
 
-  const outputCanvas = appearance.transparentBackground ? cropCanvasToVisibleBounds(canvas) : canvas;
+  const outputCanvas = appearance.transparentBackground && trimTransparentOutput
+    ? cropCanvasToVisibleBounds(canvas)
+    : canvas;
   const blob = await canvasToBlob(outputCanvas);
 
   return {
@@ -261,5 +272,6 @@ export async function renderFrameSheet(
     objectUrl: URL.createObjectURL(blob),
     outputWidth: outputCanvas.width,
     outputHeight: outputCanvas.height,
+    frameRects,
   };
 }

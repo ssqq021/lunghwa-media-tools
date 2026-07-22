@@ -60,6 +60,12 @@ export type RenderResult = {
   objectUrl: string;
   outputWidth: number;
   outputHeight: number;
+  frameRects: Array<{
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  }>;
 };
 
 export type SpineExportOptions = {
@@ -105,6 +111,7 @@ export type SpineDraft = {
   width: number;
   height: number;
   transparent: boolean;
+  sheetOptions: SheetOptions;
 };
 
 export type LayoutMetrics = {

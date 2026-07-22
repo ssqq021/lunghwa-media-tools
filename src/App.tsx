@@ -381,6 +381,7 @@ function buildSpineDraftFromAssets(
   baseName: string,
   width: number,
   height: number,
+  sheetOptions: SheetOptions,
 ): SpineDraft {
   const transparent = Boolean(assets.processed);
   return {
@@ -389,6 +390,7 @@ function buildSpineDraftFromAssets(
     width,
     height,
     transparent,
+    sheetOptions,
   };
 }
 
@@ -1748,6 +1750,7 @@ function App() {
         baseFileName,
         outputVideoMeta.width,
         outputVideoMeta.height,
+        sheetOptions,
       );
 
       pendingSpineScrollTopRef.current = window.scrollY;
@@ -1779,8 +1782,27 @@ function App() {
 
       setError(null);
       setIsRendering(true);
-      setStatus('正在打包 Spine JSON + PNG ZIP...');
-      const blob = await buildSpineBundleZip(spineDraft, spineOptions);
+      setStatus('正在按第 7 步排布生成单张 Spine 图集 PNG + JSON ZIP...');
+      const exportDraft = { ...spineDraft, sheetOptions };
+      const atlas = await renderFrameSheet(
+        exportDraft.frames,
+        {
+          duration: 0,
+          width: exportDraft.width,
+          height: exportDraft.height,
+          name: exportDraft.baseName,
+        },
+        exportDraft.sheetOptions,
+        false,
+        getSheetAppearance(spineDraft.transparent),
+        false,
+      );
+      let blob: Blob;
+      try {
+        blob = await buildSpineBundleZip(exportDraft, spineOptions, atlas);
+      } finally {
+        URL.revokeObjectURL(atlas.objectUrl);
+      }
       triggerBlobDownload(blob, getSpineZipFileName(spineDraft.baseName));
       setStatus('Spine ZIP 已生成并开始下载。');
     } catch (nextError) {
@@ -3651,12 +3673,12 @@ function App() {
 
             <div className="panel download-panel">
               <div className="panel-head">
-                <h2>Spine 导出参数</h2>
-                <span>JSON + PNG ZIP</span>
+                <h2>Spine / Unity 图集导出</h2>
+                <span>单张 PNG + JSON ZIP</span>
               </div>
 
               <p className="download-copy">
-                导出会生成 `skeleton.json`、`images/*.png` 和 `README.txt`，适合继续导入 Spine 作为单槽位逐帧动画。
+                导出会生成按第 7 步排布的单张图集 PNG、Spine JSON、图集描述和 Unity 切片 JSON，不再逐帧输出 PNG。
               </p>
 
               <div className="export-config-grid">
@@ -3735,7 +3757,7 @@ function App() {
                   type="button"
                   onClick={() => void handleDownloadSpineZip()}
                 >
-                  下载 Spine ZIP
+                  下载图集 Spine ZIP
                 </button>
               </div>
             </div>
