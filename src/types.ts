@@ -70,9 +70,17 @@ export type RenderResult = {
 
 export type SpineExportOptions = {
   skeletonName: string;
-  animationName: string;
   slotName: string;
   fps: number;
+  animations: SpineAnimationClip[];
+};
+
+export type SpineAnimationClip = {
+  id: string;
+  name: string;
+  startFrame: number;
+  endFrame: number;
+  loop: boolean;
 };
 
 export type ExtractedFrame = {

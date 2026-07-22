@@ -12,6 +12,7 @@ import type {
   ProcessedFrame,
   RenderResult,
   SheetOptions,
+  SpineAnimationClip,
   SpineDraft,
   SpineExportOptions,
   VideoMeta,
@@ -394,6 +395,22 @@ function buildSpineDraftFromAssets(
   };
 }
 
+let spineAnimationId = 0;
+
+function createSpineAnimationClip(
+  frameCount: number,
+  index: number,
+): SpineAnimationClip {
+  spineAnimationId += 1;
+  return {
+    id: `animation-${spineAnimationId}`,
+    name: index === 0 ? 'idle' : `animation-${index + 1}`,
+    startFrame: 0,
+    endFrame: Math.max(frameCount - 1, 0),
+    loop: index === 0,
+  };
+}
+
 function App() {
   const [appMode, setAppMode] = useState<AppMode>('sheet');
   const [videoMeta, setVideoMeta] = useState<VideoMeta | null>(null);
@@ -442,11 +459,11 @@ function App() {
   const [spineDraft, setSpineDraft] = useState<SpineDraft | null>(null);
   const [spineOptions, setSpineOptions] = useState<SpineExportOptions>({
     skeletonName: 'video',
-    animationName: 'idle',
     slotName: 'sprite',
     fps: DEFAULT_FRAMES_PER_SECOND,
+    animations: [],
   });
-  const [spineLoopPreview, setSpineLoopPreview] = useState(true);
+  const [activeSpineAnimationId, setActiveSpineAnimationId] = useState<string | null>(null);
   const spinePreviewMode: SpinePreviewMode = 'animation';
   const [spineAnimationPlaying, setSpineAnimationPlaying] = useState(true);
   const [spineAnimationFrameIndex, setSpineAnimationFrameIndex] = useState(0);
@@ -771,6 +788,21 @@ function App() {
     return filteredAssets?.frames ?? [];
   }, [filteredAssets]);
   const spineFrames = useMemo<ExtractedFrame[]>(() => spineDraft?.frames ?? [], [spineDraft]);
+  const activeSpineAnimation = useMemo(
+    () => spineOptions.animations.find((clip) => clip.id === activeSpineAnimationId)
+      ?? spineOptions.animations[0]
+      ?? null,
+    [activeSpineAnimationId, spineOptions.animations],
+  );
+  const spinePreviewStartFrame = activeSpineAnimation
+    ? Math.min(Math.max(activeSpineAnimation.startFrame, 0), Math.max(spineFrames.length - 1, 0))
+    : 0;
+  const spinePreviewEndFrame = activeSpineAnimation
+    ? Math.min(Math.max(activeSpineAnimation.endFrame, spinePreviewStartFrame), Math.max(spineFrames.length - 1, 0))
+    : Math.max(spineFrames.length - 1, 0);
+  const spinePreviewFrameCount = spineFrames.length
+    ? spinePreviewEndFrame - spinePreviewStartFrame + 1
+    : 0;
 
   function scrollToStep(target: { current: HTMLElement | null }): void {
     window.setTimeout(() => {
@@ -819,7 +851,7 @@ function App() {
     setSpineDraft(null);
     setSpineAnimationFrameIndex(0);
     setSpineAnimationPlaying(true);
-    setSpineLoopPreview(true);
+    setActiveSpineAnimationId(null);
     lastSheetPreviewConfigRef.current = null;
     autoPreviewInFlightRef.current = false;
     if (autoPreviewTimerRef.current !== null) {
@@ -1210,8 +1242,12 @@ function App() {
       return;
     }
 
-    setSpineAnimationFrameIndex((current) => Math.min(current, spineFrames.length - 1));
-  }, [spineFrames.length]);
+    setSpineAnimationFrameIndex((current) => (
+      current < spinePreviewStartFrame || current > spinePreviewEndFrame
+        ? spinePreviewStartFrame
+        : current
+    ));
+  }, [spineFrames.length, spinePreviewEndFrame, spinePreviewStartFrame]);
 
   useEffect(() => {
     const frame = spineFrames[spineAnimationFrameIndex];
@@ -1318,11 +1354,10 @@ function App() {
     const playbackFps = Math.min(Math.max(spineOptions.fps, 1), 60);
     const interval = window.setInterval(() => {
       setSpineAnimationFrameIndex((current) => {
-        if (spineLoopPreview) {
-          return (current + 1) % spineFrames.length;
-        }
-
-        if (current >= spineFrames.length - 1) {
+        if (current >= spinePreviewEndFrame) {
+          if (activeSpineAnimation?.loop) {
+            return spinePreviewStartFrame;
+          }
           window.clearInterval(interval);
           setSpineAnimationPlaying(false);
           return current;
@@ -1335,7 +1370,15 @@ function App() {
     return () => {
       window.clearInterval(interval);
     };
-  }, [spineAnimationPlaying, spineFrames.length, spineLoopPreview, spineOptions.fps, spinePreviewMode]);
+  }, [
+    activeSpineAnimation?.loop,
+    spineAnimationPlaying,
+    spineFrames.length,
+    spineOptions.fps,
+    spinePreviewEndFrame,
+    spinePreviewMode,
+    spinePreviewStartFrame,
+  ]);
 
   useEffect(() => {
     if (!showResultStage || autoPreviewInFlightRef.current) {
@@ -1756,13 +1799,14 @@ function App() {
       pendingSpineScrollTopRef.current = window.scrollY;
       pendingSpineScrollRef.current = true;
       setSpineDraft(nextDraft);
+      const firstAnimation = createSpineAnimationClip(nextDraft.frames.length, 0);
       setSpineOptions({
         skeletonName: baseFileName,
-        animationName: 'idle',
         slotName: 'sprite',
         fps: framesPerSecond,
+        animations: [firstAnimation],
       });
-      setSpineLoopPreview(true);
+      setActiveSpineAnimationId(firstAnimation.id);
       setSpineAnimationFrameIndex(0);
       setSpineAnimationPlaying(true);
       setStatus('Spine 动画工作区已准备好，可以继续预览或下载 Spine ZIP。');
@@ -1771,6 +1815,46 @@ function App() {
       pendingSpineScrollTopRef.current = null;
       setError(nextError instanceof Error ? nextError.message : '打开 Spine 工作区失败。');
       setStatus('Spine 工作区打开失败，请稍后重试。');
+    }
+  }
+
+  function selectSpineAnimation(clip: SpineAnimationClip): void {
+    setActiveSpineAnimationId(clip.id);
+    setSpineAnimationFrameIndex(clip.startFrame);
+    setSpineAnimationPlaying(true);
+  }
+
+  function updateSpineAnimation(
+    clipId: string,
+    update: Partial<Omit<SpineAnimationClip, 'id'>>,
+  ): void {
+    setSpineOptions((current) => ({
+      ...current,
+      animations: current.animations.map((clip) => (
+        clip.id === clipId ? { ...clip, ...update } : clip
+      )),
+    }));
+  }
+
+  function addSpineAnimation(): void {
+    const clip = createSpineAnimationClip(spineFrames.length, spineOptions.animations.length);
+    setSpineOptions((current) => ({
+      ...current,
+      animations: [...current.animations, clip],
+    }));
+    selectSpineAnimation(clip);
+  }
+
+  function removeSpineAnimation(clipId: string): void {
+    if (spineOptions.animations.length <= 1) {
+      return;
+    }
+
+    const nextAnimations = spineOptions.animations.filter((clip) => clip.id !== clipId);
+    setSpineOptions((current) => ({ ...current, animations: nextAnimations }));
+    const nextActive = nextAnimations.find((clip) => clip.id !== clipId) ?? null;
+    if (nextActive) {
+      selectSpineAnimation(nextActive);
     }
   }
 
@@ -2332,6 +2416,7 @@ function App() {
   function switchAppMode(nextMode: AppMode): void {
     setAppMode(nextMode);
     setSpineDraft(null);
+    setActiveSpineAnimationId(null);
     setSamplePoint(null);
     setColorSample(null);
     setCommittedColorKeys([]);
@@ -3620,9 +3705,13 @@ function App() {
               </div>
 
               <div className="spine-preview-note option-card option-card--metric">
-                <span>当前资源</span>
-                <strong>{spineDraft.frames.length} 帧</strong>
-                <small>{spineDraft.baseName} · {spineOptions.fps} FPS</small>
+                <span>{activeSpineAnimation ? `正在预览：${activeSpineAnimation.name}` : '当前资源'}</span>
+                <strong>{spinePreviewFrameCount} 帧</strong>
+                <small>
+                  {activeSpineAnimation
+                    ? `第 ${spinePreviewStartFrame + 1}–${spinePreviewEndFrame + 1} 帧 · ${activeSpineAnimation.loop ? '循环' : '播放一次'}`
+                    : `${spineDraft.baseName} · ${spineOptions.fps} FPS`}
+                </small>
               </div>
 
               <div
@@ -3640,7 +3729,7 @@ function App() {
               <div className="animation-toolbar">
                 <div className="animation-meta">
                   <strong>
-                    第 {Math.min(spineAnimationFrameIndex + 1, spineFrames.length)} / {spineFrames.length} 帧
+                    第 {Math.max(spineAnimationFrameIndex - spinePreviewStartFrame + 1, 1)} / {spinePreviewFrameCount} 帧
                   </strong>
                   <span>
                     {spineFrames[spineAnimationFrameIndex]
@@ -3661,7 +3750,7 @@ function App() {
                     className="ghost-button"
                     type="button"
                     onClick={() => {
-                      setSpineAnimationFrameIndex(0);
+                      setSpineAnimationFrameIndex(spinePreviewStartFrame);
                       setSpineAnimationPlaying(true);
                     }}
                   >
@@ -3697,20 +3786,6 @@ function App() {
                 </label>
 
                 <label className="field">
-                  <span>动画名</span>
-                  <input
-                    type="text"
-                    value={spineOptions.animationName}
-                    onChange={(event) =>
-                      setSpineOptions((current) => ({
-                        ...current,
-                        animationName: event.target.value || 'idle',
-                      }))
-                    }
-                  />
-                </label>
-
-                <label className="field">
                   <span>插槽名</span>
                   <input
                     type="text"
@@ -3740,14 +3815,95 @@ function App() {
                   />
                 </label>
 
-                <label className="toggle-card export-config-grid__full">
-                  <input
-                    checked={spineLoopPreview}
-                    type="checkbox"
-                    onChange={(event) => setSpineLoopPreview(event.target.checked)}
-                  />
-                  <span>循环预览</span>
-                </label>
+                <div className="spine-clip-editor export-config-grid__full">
+                  <div className="spine-clip-editor__head">
+                    <div>
+                      <strong>动作切分与循环预览</strong>
+                      <span>选择一个动作后，预览只播放该动作范围。</span>
+                    </div>
+                    <button className="ghost-button" type="button" onClick={addSpineAnimation}>
+                      新增动作
+                    </button>
+                  </div>
+
+                  <div className="spine-clip-list" aria-label="动作分段列表">
+                    {spineOptions.animations.map((clip) => (
+                      <div
+                        key={clip.id}
+                        className={`spine-clip-row ${activeSpineAnimation?.id === clip.id ? 'is-active' : ''}`}
+                      >
+                        <button type="button" onClick={() => selectSpineAnimation(clip)}>
+                          <strong>{clip.name || '未命名动作'}</strong>
+                          <span>第 {clip.startFrame + 1}–{clip.endFrame + 1} 帧 · {clip.loop ? '循环' : '一次'}</span>
+                        </button>
+                        <button
+                          aria-label={`删除动作 ${clip.name}`}
+                          className="spine-clip-row__delete"
+                          disabled={spineOptions.animations.length <= 1}
+                          type="button"
+                          onClick={() => removeSpineAnimation(clip.id)}
+                        >
+                          删除
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+
+                  {activeSpineAnimation ? (
+                    <div className="spine-clip-fields">
+                      <label className="field">
+                        <span>动作名</span>
+                        <input
+                          type="text"
+                          value={activeSpineAnimation.name}
+                          onChange={(event) => updateSpineAnimation(activeSpineAnimation.id, {
+                            name: event.target.value,
+                          })}
+                        />
+                      </label>
+                      <label className="field">
+                        <span>起始帧</span>
+                        <input
+                          min={1}
+                          max={activeSpineAnimation.endFrame + 1}
+                          type="number"
+                          value={activeSpineAnimation.startFrame + 1}
+                          onChange={(event) => updateSpineAnimation(activeSpineAnimation.id, {
+                            startFrame: Math.min(
+                              Math.max((Number(event.target.value) || 1) - 1, 0),
+                              activeSpineAnimation.endFrame,
+                            ),
+                          })}
+                        />
+                      </label>
+                      <label className="field">
+                        <span>结束帧</span>
+                        <input
+                          min={activeSpineAnimation.startFrame + 1}
+                          max={spineFrames.length}
+                          type="number"
+                          value={activeSpineAnimation.endFrame + 1}
+                          onChange={(event) => updateSpineAnimation(activeSpineAnimation.id, {
+                            endFrame: Math.max(
+                              Math.min((Number(event.target.value) || 1) - 1, spineFrames.length - 1),
+                              activeSpineAnimation.startFrame,
+                            ),
+                          })}
+                        />
+                      </label>
+                      <label className="toggle-card">
+                        <input
+                          checked={activeSpineAnimation.loop}
+                          type="checkbox"
+                          onChange={(event) => updateSpineAnimation(activeSpineAnimation.id, {
+                            loop: event.target.checked,
+                          })}
+                        />
+                        <span>循环预览与导出</span>
+                      </label>
+                    </div>
+                  ) : null}
+                </div>
               </div>
 
               <div className="export-actions">

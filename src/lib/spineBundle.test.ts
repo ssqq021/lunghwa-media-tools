@@ -33,9 +33,12 @@ const draft: SpineDraft = {
 
 const options: SpineExportOptions = {
   skeletonName: 'demo',
-  animationName: 'idle',
   slotName: 'sprite',
   fps: 12,
+  animations: [
+    { id: 'idle', name: 'idle', startFrame: 0, endFrame: 1, loop: true },
+    { id: 'attack', name: 'attack', startFrame: 2, endFrame: 2, loop: false },
+  ],
 };
 
 const atlas: SpineAtlasExport = {
@@ -80,11 +83,17 @@ describe('spine bundle helpers', () => {
     });
     expect(json.animations.idle.slots.sprite.attachment).toEqual([
       {
+        time: 0,
+        name: 'demo-clip-spine-001',
+      },
+      {
         time: 0.083333,
         name: 'demo-clip-spine-002',
       },
+    ]);
+    expect(json.animations.attack.slots.sprite.attachment).toEqual([
       {
-        time: 0.166667,
+        time: 0,
         name: 'demo-clip-spine-003',
       },
     ]);
@@ -105,6 +114,10 @@ describe('spine bundle helpers', () => {
         { name: 'demo-clip-spine-002', x: 72, y: 0, width: 64, height: 64, time: 0.083333 },
         { name: 'demo-clip-spine-003', x: 0, y: 72, width: 64, height: 64, time: 0.166667 },
       ],
+      animations: [
+        { name: 'idle', startFrame: 0, endFrame: 1, loop: true },
+        { name: 'attack', startFrame: 2, endFrame: 2, loop: false },
+      ],
     });
   });
 
@@ -117,6 +130,17 @@ describe('spine bundle helpers', () => {
     expect(readme).toContain('demo-clip-unity-sprites.json');
     expect(readme).toContain('fps: 12');
     expect(readme).toContain('transparent: yes');
+    expect(readme).toContain('idle: 1-2 帧（循环）');
+  });
+
+  it('rejects duplicate action names before exporting', () => {
+    expect(() => buildSpineSkeletonData(draft, {
+      ...options,
+      animations: [
+        { id: 'first', name: 'idle', startFrame: 0, endFrame: 0, loop: true },
+        { id: 'second', name: 'idle', startFrame: 1, endFrame: 2, loop: false },
+      ],
+    }, atlas)).toThrow('重复');
   });
 
   it('packages one atlas PNG instead of individual frame PNGs', async () => {

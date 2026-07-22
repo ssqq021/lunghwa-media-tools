@@ -1,5 +1,5 @@
 import JSZip from 'jszip';
-import type { RenderResult, SpineDraft, SpineExportOptions } from '../types';
+import type { RenderResult, SpineAnimationClip, SpineDraft, SpineExportOptions } from '../types';
 import { getBaseFileName } from './exportBundle';
 
 export type SpineAtlasExport = Pick<RenderResult, 'blob' | 'outputWidth' | 'outputHeight' | 'frameRects'>;
@@ -62,6 +62,12 @@ type UnitySpriteManifest = {
     height: number;
     time: number;
   }>;
+  animations: Array<{
+    name: string;
+    startFrame: number;
+    endFrame: number;
+    loop: boolean;
+  }>;
 };
 
 export function getSpineJsonFileName(baseName: string): string {
@@ -97,6 +103,30 @@ function getFrameRect(atlas: SpineAtlasExport, index: number): RenderResult['fra
   return rect;
 }
 
+function getClipRange(clip: SpineAnimationClip, frameCount: number): { startFrame: number; endFrame: number } {
+  const startFrame = Math.min(Math.max(clip.startFrame, 0), Math.max(frameCount - 1, 0));
+  const endFrame = Math.min(Math.max(clip.endFrame, startFrame), Math.max(frameCount - 1, 0));
+  return { startFrame, endFrame };
+}
+
+function validateAnimationClips(clips: SpineAnimationClip[]): void {
+  if (!clips.length) {
+    throw new Error('请至少保留一个动作分段。');
+  }
+
+  const names = new Set<string>();
+  for (const clip of clips) {
+    const name = clip.name.trim();
+    if (!name) {
+      throw new Error('每个动作分段都需要名称。');
+    }
+    if (names.has(name)) {
+      throw new Error(`动作名称“${name}”重复，请修改后再导出。`);
+    }
+    names.add(name);
+  }
+}
+
 export function buildSpineReadme(draft: SpineDraft, options: SpineExportOptions): string {
   return [
     'Spine / Unity 图集动画导出说明',
@@ -112,13 +142,18 @@ export function buildSpineReadme(draft: SpineDraft, options: SpineExportOptions)
     '',
     '当前导出参数：',
     `- skeleton: ${options.skeletonName}`,
-    `- animation: ${options.animationName}`,
     `- slot: ${options.slotName}`,
     `- fps: ${options.fps}`,
     `- frames: ${draft.frames.length}`,
     `- columns: ${draft.sheetOptions.columns}`,
     `- gap: ${draft.sheetOptions.gap}`,
     `- transparent: ${draft.transparent ? 'yes' : 'no'}`,
+    '',
+    '动作分段：',
+    ...options.animations.map((clip) => {
+      const range = getClipRange(clip, draft.frames.length);
+      return `- ${clip.name}: ${range.startFrame + 1}-${range.endFrame + 1} 帧${clip.loop ? '（循环）' : ''}`;
+    }),
   ].join('\n');
 }
 
@@ -127,6 +162,7 @@ export function buildSpineSkeletonData(
   options: SpineExportOptions,
   atlas: SpineAtlasExport,
 ): SpineSkeletonJson {
+  validateAnimationClips(options.animations);
   const attachmentEntries = Object.fromEntries(
     draft.frames.map((_, index) => {
       const attachmentName = getSpineFrameStem(draft.baseName, index);
@@ -145,9 +181,26 @@ export function buildSpineSkeletonData(
     }),
   );
 
-  const attachmentTimeline = draft.frames.slice(1).map((_, index) => ({
-    time: Number(((index + 1) / Math.max(options.fps, 1)).toFixed(6)),
-    name: getSpineFrameStem(draft.baseName, index + 1),
+  const defaultAnimation = options.animations[0];
+  const defaultFrame = defaultAnimation ? getClipRange(defaultAnimation, draft.frames.length).startFrame : 0;
+  const animations = Object.fromEntries(options.animations.map((clip) => {
+    const { startFrame, endFrame } = getClipRange(clip, draft.frames.length);
+    return [
+      clip.name.trim(),
+      {
+        slots: {
+          [options.slotName]: {
+            attachment: Array.from({ length: endFrame - startFrame + 1 }, (_, offset) => {
+              const frameIndex = startFrame + offset;
+              return {
+                time: Number((offset / Math.max(options.fps, 1)).toFixed(6)),
+                name: getSpineFrameStem(draft.baseName, frameIndex),
+              };
+            }),
+          },
+        },
+      },
+    ];
   }));
 
   return {
@@ -165,7 +218,7 @@ export function buildSpineSkeletonData(
       {
         name: options.slotName,
         bone: 'root',
-        attachment: getSpineFrameStem(draft.baseName, 0),
+        attachment: getSpineFrameStem(draft.baseName, defaultFrame),
       },
     ],
     skins: [
@@ -176,15 +229,7 @@ export function buildSpineSkeletonData(
         },
       },
     ],
-    animations: {
-      [options.animationName]: {
-        slots: {
-          [options.slotName]: {
-            attachment: attachmentTimeline,
-          },
-        },
-      },
-    },
+    animations,
   };
 }
 
@@ -223,6 +268,7 @@ export function buildUnitySpriteManifest(
   options: SpineExportOptions,
   atlas: SpineAtlasExport,
 ): UnitySpriteManifest {
+  validateAnimationClips(options.animations);
   return {
     version: 1,
     texture: getSpineAtlasFileName(draft.baseName),
@@ -238,6 +284,11 @@ export function buildUnitySpriteManifest(
         time: Number((index / Math.max(options.fps, 1)).toFixed(6)),
       };
     }),
+    animations: options.animations.map((clip) => ({
+      name: clip.name.trim(),
+      ...getClipRange(clip, draft.frames.length),
+      loop: clip.loop,
+    })),
   };
 }
 
@@ -249,6 +300,7 @@ export async function buildSpineBundleZip(
   if (atlas.frameRects.length !== draft.frames.length) {
     throw new Error('图集帧数与动画帧数不一致，请重新生成后再导出。');
   }
+  validateAnimationClips(options.animations);
 
   const zip = new JSZip();
   zip.file(getSpineJsonFileName(draft.baseName), JSON.stringify(buildSpineSkeletonData(draft, options, atlas), null, 2));

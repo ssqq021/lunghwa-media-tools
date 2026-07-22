@@ -1586,6 +1586,95 @@ button {
   margin-bottom: 12px;
 }
 
+.spine-clip-editor {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid rgba(113, 92, 255, 0.16);
+  border-radius: 16px;
+  background: rgba(247, 248, 253, 0.82);
+}
+
+.spine-clip-editor__head,
+.spine-clip-row,
+.spine-clip-row > button:first-child {
+  display: flex;
+  align-items: center;
+}
+
+.spine-clip-editor__head {
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.spine-clip-editor__head > div {
+  display: grid;
+  gap: 3px;
+}
+
+.spine-clip-editor__head span,
+.spine-clip-row span {
+  color: #6a7783;
+  font-size: 0.82rem;
+}
+
+.spine-clip-list {
+  display: grid;
+  gap: 8px;
+}
+
+.spine-clip-row {
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px;
+  border: 1px solid rgba(113, 92, 255, 0.1);
+  border-radius: 12px;
+  background: #fff;
+}
+
+.spine-clip-row.is-active {
+  border-color: rgba(113, 92, 255, 0.48);
+  box-shadow: 0 0 0 2px rgba(113, 92, 255, 0.08);
+}
+
+.spine-clip-row > button:first-child {
+  flex: 1;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 9px;
+  background: transparent;
+  color: #182230;
+  cursor: pointer;
+  text-align: left;
+}
+
+.spine-clip-row > button:first-child:hover {
+  background: rgba(113, 92, 255, 0.06);
+}
+
+.spine-clip-row__delete {
+  padding: 7px 9px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: #c2410c;
+  cursor: pointer;
+}
+
+.spine-clip-row__delete:disabled {
+  color: #9ca3af;
+  cursor: not-allowed;
+}
+
+.spine-clip-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
 .download-copy {
   margin: 0;
   color: #52616e;
