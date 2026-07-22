@@ -72,7 +72,6 @@ import {
 import ImageCutoutTool from './ImageCutoutTool';
 import ImageResizeTool from './ImageResizeTool';
 import ImageCompressTool from './ImageCompressTool';
-import UiLayerTool from './UiLayerTool';
 
 const DEFAULT_FRAMES_PER_SECOND = 12;
 const DEFAULT_COLUMNS = 4;
@@ -115,7 +114,7 @@ type ResultPreviewMode = 'sheet' | 'animation';
 type SpinePreviewMode = 'animation';
 
 type ExportPresetValue = (typeof EXPORT_PRESETS)[number]['value'];
-type AppMode = 'sheet' | 'cutout' | 'resize' | 'compress' | 'ui-layer';
+type AppMode = 'sheet' | 'cutout' | 'resize' | 'compress';
 
 type DragSelection = {
   start: SamplePoint;
@@ -751,7 +750,6 @@ function App() {
   const isCutoutMode = appMode === 'cutout';
   const isResizeMode = appMode === 'resize';
   const isCompressMode = appMode === 'compress';
-  const isUiLayerMode = appMode === 'ui-layer';
   const isSheetMode = appMode === 'sheet';
   const canGenerate = Boolean(
     videoMeta &&
@@ -2317,8 +2315,6 @@ function App() {
           ? '已切换到图片尺寸工具，请上传图片并设置目标尺寸。'
           : nextMode === 'compress'
             ? '已切换到图片压缩工具，请上传图片并设置压缩参数。'
-            : nextMode === 'ui-layer'
-              ? '已切换到 UI 拆图工具，请先连接本地 AI 服务。'
             : '已切换回视频转序列帧表。'
     );
   }
@@ -2338,8 +2334,6 @@ function App() {
                   ? '图片尺寸工具'
                   : isCompressMode
                     ? '图片压缩工具'
-                    : isUiLayerMode
-                      ? 'UI拆图工具'
                     : '视频转序列帧表'}
             </span>
             <span className="hero-title__version">
@@ -2377,13 +2371,6 @@ function App() {
               >
                 图片压缩工具
               </button>
-              <button
-                className={`hero-link hero-link--button ${isUiLayerMode ? 'is-active' : ''}`}
-                type="button"
-                onClick={() => switchAppMode('ui-layer')}
-              >
-                UI拆图
-              </button>
             </div>
           </div>
         </section>
@@ -2396,8 +2383,6 @@ function App() {
           <ImageResizeTool onStatusChange={setStatus} />
         ) : isCompressMode ? (
           <ImageCompressTool onStatusChange={setStatus} />
-        ) : isUiLayerMode ? (
-          <UiLayerTool onStatusChange={setStatus} />
         ) : (
         <section className="workspace-grid workspace-grid--single">
           <div className="panel upload-panel">
