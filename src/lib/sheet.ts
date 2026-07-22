@@ -14,6 +14,73 @@ const LABEL_BLOCK_HEIGHT = 30;
 const CARD_PADDING = 10;
 const pica = picaFactory();
 
+type PixelBounds = { x: number; y: number; width: number; height: number };
+
+export function getVisibleBoundsFromPixels(
+  pixels: Uint8ClampedArray,
+  width: number,
+  height: number,
+): PixelBounds | null {
+  let left = Infinity;
+  let top = Infinity;
+  let right = -1;
+  let bottom = -1;
+
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      if (pixels[(y * width + x) * 4 + 3] === 0) continue;
+      left = Math.min(left, x);
+      top = Math.min(top, y);
+      right = Math.max(right, x);
+      bottom = Math.max(bottom, y);
+    }
+  }
+
+  return right < left ? null : { x: left, y: top, width: right - left + 1, height: bottom - top + 1 };
+}
+
+function getSharedVisibleBounds(frames: ExtractedFrame[]): PixelBounds | null {
+  let left = Infinity;
+  let top = Infinity;
+  let right = -1;
+  let bottom = -1;
+
+  for (const frame of frames) {
+    const context = frame.image.getContext('2d', { willReadFrequently: true });
+    if (!context) continue;
+    const { width, height } = frame.image;
+    const bounds = getVisibleBoundsFromPixels(context.getImageData(0, 0, width, height).data, width, height);
+    if (!bounds) continue;
+    left = Math.min(left, bounds.x);
+    top = Math.min(top, bounds.y);
+    right = Math.max(right, bounds.x + bounds.width - 1);
+    bottom = Math.max(bottom, bounds.y + bounds.height - 1);
+  }
+
+  return right < left ? null : { x: left, y: top, width: right - left + 1, height: bottom - top + 1 };
+}
+
+function cropFramesToSharedBounds(frames: ExtractedFrame[]): ExtractedFrame[] {
+  const bounds = getSharedVisibleBounds(frames);
+  if (!bounds) return frames;
+  return frames.map((frame) => {
+    if (bounds.x === 0 && bounds.y === 0 && bounds.width === frame.image.width && bounds.height === frame.image.height) {
+      return frame;
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = bounds.width;
+    canvas.height = bounds.height;
+    const context = canvas.getContext('2d');
+    if (context) context.drawImage(frame.image, bounds.x, bounds.y, bounds.width, bounds.height, 0, 0, bounds.width, bounds.height);
+    return { ...frame, image: canvas };
+  });
+}
+
+function cropCanvasToVisibleBounds(source: HTMLCanvasElement): HTMLCanvasElement {
+  const frame = { image: source, time: 0, label: '' };
+  return cropFramesToSharedBounds([frame])[0].image;
+}
+
 export function getLayoutMetrics(
   meta: VideoMeta,
   frameCount: number,
@@ -115,7 +182,13 @@ export async function renderFrameSheet(
   includeTimestamps: boolean,
   appearance: SheetAppearance = getSheetAppearance(false),
 ): Promise<RenderResult> {
-  const metrics = getLayoutMetrics(meta, frames.length, sheetOptions, includeTimestamps);
+  const framesForRender = cropFramesToSharedBounds(frames);
+  const renderMeta = {
+    ...meta,
+    width: framesForRender[0]?.image.width ?? meta.width,
+    height: framesForRender[0]?.image.height ?? meta.height,
+  };
+  const metrics = getLayoutMetrics(renderMeta, framesForRender.length, sheetOptions, includeTimestamps);
   const canvas = document.createElement('canvas');
   canvas.width = metrics.canvasWidth;
   canvas.height = metrics.canvasHeight;
@@ -139,7 +212,7 @@ export async function renderFrameSheet(
   const contentPadding = includeTimestamps ? CARD_PADDING : 0;
   const cardHeight = metrics.frameHeight + metrics.labelBlockHeight + contentPadding * 2;
 
-  for (const [index, frame] of frames.entries()) {
+  for (const [index, frame] of framesForRender.entries()) {
     const scaledFrame = await resizeFrameWithPica(
       frame.image,
       metrics.frameWidth,
@@ -180,12 +253,13 @@ export async function renderFrameSheet(
     }
   }
 
-  const blob = await canvasToBlob(canvas);
+  const outputCanvas = appearance.transparentBackground ? cropCanvasToVisibleBounds(canvas) : canvas;
+  const blob = await canvasToBlob(outputCanvas);
 
   return {
     blob,
     objectUrl: URL.createObjectURL(blob),
-    outputWidth: canvas.width,
-    outputHeight: canvas.height,
+    outputWidth: outputCanvas.width,
+    outputHeight: outputCanvas.height,
   };
 }

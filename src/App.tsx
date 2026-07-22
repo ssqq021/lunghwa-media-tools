@@ -3400,7 +3400,7 @@ function App() {
             </div>
 
             <p className="download-copy">
-              支持导出序列图 PNG、动画 GIF、透明帧 ZIP 和 Spine ZIP；修改导出列数、间距或单帧尺寸后，下方会自动刷新最终 PNG 排布预览。
+              支持导出序列图 PNG、动画 GIF、透明帧 ZIP 和 Spine ZIP；透明序列图会按所有帧叠加后的最大有效像素范围统一裁切，避免保留多余空白。
             </p>
 
             <div className="export-config-grid">

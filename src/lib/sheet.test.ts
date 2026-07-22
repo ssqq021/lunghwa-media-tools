@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { getLayoutMetrics, getSheetAppearance } from './sheet';
+import { getLayoutMetrics, getSheetAppearance, getVisibleBoundsFromPixels } from './sheet';
 import type { SheetOptions, VideoMeta } from '../types';
 
 const meta: VideoMeta = {
@@ -16,6 +16,19 @@ const options: SheetOptions = {
 };
 
 describe('getLayoutMetrics', () => {
+  it('finds the tight visible range across transparent pixels', () => {
+    const pixels = new Uint8ClampedArray(5 * 4 * 4);
+    pixels[(1 * 5 + 2) * 4 + 3] = 255;
+    pixels[(3 * 5 + 4) * 4 + 3] = 120;
+
+    expect(getVisibleBoundsFromPixels(pixels, 5, 4)).toEqual({
+      x: 2,
+      y: 1,
+      width: 3,
+      height: 3,
+    });
+  });
+
   it('calculates sheet size without timestamps', () => {
     expect(getLayoutMetrics(meta, 12, options, false)).toEqual({
       rows: 3,
