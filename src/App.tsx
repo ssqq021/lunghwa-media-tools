@@ -94,6 +94,7 @@ const EXPORT_PRESETS = [
   { value: '64', label: '64 × 64', frameSize: 64 },
   { value: '128', label: '128 × 128', frameSize: 128 },
   { value: '256', label: '256 × 256', frameSize: 256 },
+  { value: '512', label: '512 × 512', frameSize: 512 },
 ] as const;
 type SamplePoint = {
   x: number;
