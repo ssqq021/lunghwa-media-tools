@@ -385,15 +385,16 @@ function buildSpineDraftFromAssets(
   sheetOptions: SheetOptions,
 ): SpineDraft {
   const transparent = Boolean(assets.processed);
+  const draftFrames = transparent ? toTransparentSheetFrames(assets.processed ?? []) : assets.frames;
   return {
-    frames: transparent ? toTransparentSheetFrames(assets.processed ?? []) : assets.frames,
+    frames: draftFrames,
     baseName,
     width,
     height,
     transparent,
     sheetOptions,
-    sourceFrameIndices: Array.from({ length: frames.length }, (_, index) => index),
-    sourceFrameCount: frames.length,
+    sourceFrameIndices: Array.from({ length: draftFrames.length }, (_, index) => index),
+    sourceFrameCount: draftFrames.length,
   };
 }
 
