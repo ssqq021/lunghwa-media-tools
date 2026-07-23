@@ -1214,6 +1214,11 @@ button {
   touch-action: none;
 }
 
+.preview-canvas.is-shadow-pen {
+  cursor: crosshair;
+  touch-action: none;
+}
+
 .sample-badge {
   display: flex;
   align-items: center;
@@ -1291,6 +1296,27 @@ button {
   color: #7c3aed;
 }
 
+.canvas-zoom-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.canvas-zoom-actions .ghost-button {
+  min-height: 34px;
+  padding: 0 10px;
+}
+
+.canvas-zoom-actions span {
+  min-width: 48px;
+  color: #4b5563;
+  font-size: 0.84rem;
+  font-weight: 700;
+  text-align: center;
+}
+
 .canvas-footer {
   display: flex;
   align-items: center;
@@ -1305,6 +1331,25 @@ button {
   border: 1px solid rgba(113, 92, 255, 0.12);
   overflow: auto;
   background: #eef1fb;
+}
+
+.watermark-canvas-viewport {
+  height: min(58vh, 560px);
+}
+
+.watermark-canvas-stage {
+  margin: auto;
+}
+
+.watermark-canvas-viewport.is-middle-panning,
+.preview-wrap--sequence-animation.is-middle-panning {
+  cursor: grabbing;
+  user-select: none;
+}
+
+.watermark-canvas-viewport.is-middle-panning .preview-canvas,
+.preview-wrap--sequence-animation.is-middle-panning .preview-canvas {
+  cursor: grabbing;
 }
 
 .checkerboard {
@@ -1906,6 +1951,23 @@ button {
   background: rgba(248, 250, 252, 0.92);
 }
 
+.cleanup-tool-switch {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px 14px;
+}
+
+.cleanup-tool-switch > span {
+  color: #5b6678;
+  font-size: 0.88rem;
+}
+
+.shadow-toolbar {
+  border-color: rgba(124, 58, 237, 0.18);
+  background: rgba(245, 243, 255, 0.72);
+}
+
 .watermark-toolbar__copy {
   display: flex;
   flex-direction: column;
@@ -1928,6 +1990,21 @@ button {
   gap: 10px;
 }
 
+.shadow-tolerance {
+  display: grid;
+  grid-template-columns: minmax(130px, auto) minmax(140px, 240px);
+  align-items: center;
+  gap: 10px;
+  margin-top: 6px;
+  color: #4c3b91;
+  font-weight: 700;
+}
+
+.shadow-tolerance input {
+  width: 100%;
+  accent-color: #7c3aed;
+}
+
 .watermark-pass-list {
   display: flex;
   flex-wrap: wrap;
@@ -1940,6 +2017,11 @@ button {
   background: rgba(109, 40, 217, 0.08);
   color: #5b4aa5;
   font-size: 0.82rem;
+}
+
+.shadow-pass-list span {
+  background: rgba(124, 58, 237, 0.12);
+  color: #5b21b6;
 }
 
 @media (max-width: 1120px) {

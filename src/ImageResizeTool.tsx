@@ -2,6 +2,15 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import JSZip from 'jszip';
 import picaFactory from 'pica';
 import { getBaseFileName } from './lib/exportBundle';
+import {
+  assertCanvasSize,
+  assertEstimatedCanvasBytes,
+  estimateCanvasBytes,
+} from './lib/resourceBudget';
+import {
+  createLatestTaskTracker,
+  isStaleTaskError,
+} from './lib/latestTask';
 
 const MAX_FILES = 50;
 const MAX_SIZE_MB = 50;
@@ -9,6 +18,7 @@ const ACCEPTED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 
 const DEFAULT_SCALE = 75;
 const DEFAULT_DIMENSION = 1080;
+const MAX_IMAGE_SIDE = 8192;
 
 type ResizeMode = 'scale' | 'dimension';
 type DimensionMode = 'fixed' | 'width' | 'height' | 'max' | 'min';
@@ -88,6 +98,12 @@ function loadImageFile(file: File): Promise<HTMLCanvasElement> {
 
     image.onload = () => {
       URL.revokeObjectURL(url);
+      try {
+        assertCanvasSize(image.naturalWidth, image.naturalHeight, '源图片');
+      } catch (error) {
+        reject(error);
+        return;
+      }
       const canvas = document.createElement('canvas');
       canvas.width = image.naturalWidth;
       canvas.height = image.naturalHeight;
@@ -213,6 +229,10 @@ async function renderItem(
   if (!target || target.width < 1 || target.height < 1) {
     throw new Error('目标尺寸无效，请检查输入。');
   }
+  if (target.width > MAX_IMAGE_SIDE || target.height > MAX_IMAGE_SIDE) {
+    throw new Error(`目标尺寸不能超过 ${MAX_IMAGE_SIDE} × ${MAX_IMAGE_SIDE} 像素。`);
+  }
+  assertCanvasSize(target.width, target.height, '目标图片');
 
   const isUpscale = target.width >= item.width && target.height >= item.height;
   if (options.skipSmall && isUpscale) {
@@ -284,6 +304,7 @@ type SliderNumberFieldProps = {
   hint?: string;
   sliderMin: number;
   sliderMax: number;
+  numberMax: number;
   step?: number;
   value: number;
   onChange: (next: number) => void;
@@ -294,6 +315,7 @@ function SliderNumberField({
   hint,
   sliderMin,
   sliderMax,
+  numberMax,
   step = 1,
   value,
   onChange,
@@ -316,10 +338,13 @@ function SliderNumberField({
           />
           <input
             className="range-field__num"
+            max={numberMax}
             min={1}
             type="number"
             value={value === 0 ? '' : value}
-            onChange={(event) => onChange(Number(event.target.value))}
+            onChange={(event) => onChange(
+              Math.min(numberMax, Math.max(1, Number(event.target.value) || 1)),
+            )}
           />
         </div>
         {hint ? <small>{hint}</small> : null}
@@ -345,6 +370,8 @@ function ImageResizeTool({ onStatusChange }: ImageResizeToolProps) {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const picaRef = useRef<ReturnType<typeof picaFactory>>(picaFactory());
   const itemsRef = useRef<ResizeItem[]>([]);
+  const fileTaskTrackerRef = useRef(createLatestTaskTracker());
+  const processTaskTrackerRef = useRef(createLatestTaskTracker());
 
   itemsRef.current = items;
 
@@ -363,7 +390,14 @@ function ImageResizeTool({ onStatusChange }: ImageResizeToolProps) {
   );
 
   useEffect(() => {
+    processTaskTrackerRef.current.invalidate();
+    setIsProcessing(false);
+  }, [options]);
+
+  useEffect(() => {
     return () => {
+      fileTaskTrackerRef.current.invalidate();
+      processTaskTrackerRef.current.invalidate();
       itemsRef.current.forEach((item) => {
         if (item.resultUrl) {
           URL.revokeObjectURL(item.resultUrl);
@@ -424,11 +458,19 @@ function ImageResizeTool({ onStatusChange }: ImageResizeToolProps) {
       return;
     }
 
+    const taskToken = fileTaskTrackerRef.current.begin();
+    processTaskTrackerRef.current.invalidate();
+    setIsProcessing(false);
+
     setError(null);
 
     const incoming = Array.from(fileList);
     const nextItems: ResizeItem[] = [];
     const rejected: string[] = [];
+    let estimatedBytes = items.reduce(
+      (total, item) => total + estimateCanvasBytes(item.width, item.height),
+      0,
+    );
 
     for (const file of incoming) {
       if (items.length + nextItems.length >= MAX_FILES) {
@@ -448,6 +490,10 @@ function ImageResizeTool({ onStatusChange }: ImageResizeToolProps) {
 
       try {
         const canvas = await loadImageFile(file);
+        fileTaskTrackerRef.current.assertCurrent(taskToken);
+        const nextEstimatedBytes = estimatedBytes + estimateCanvasBytes(canvas.width, canvas.height);
+        assertEstimatedCanvasBytes(nextEstimatedBytes, '图片列表');
+        estimatedBytes = nextEstimatedBytes;
         nextItems.push({
           id: `resize-${itemSeq}`,
           file,
@@ -465,10 +511,12 @@ function ImageResizeTool({ onStatusChange }: ImageResizeToolProps) {
         });
         itemSeq += 1;
       } catch (nextError) {
+        if (isStaleTaskError(nextError)) return;
         rejected.push(`${file.name}（${nextError instanceof Error ? nextError.message : '读取失败'}）`);
       }
     }
 
+    if (!fileTaskTrackerRef.current.isCurrent(taskToken)) return;
     if (nextItems.length > 0) {
       setItems((current) => [...current, ...nextItems]);
       onStatusChange(`已加入 ${nextItems.length} 张图片，共 ${items.length + nextItems.length} 张待处理。`);
@@ -480,6 +528,8 @@ function ImageResizeTool({ onStatusChange }: ImageResizeToolProps) {
   }
 
   function handleRemoveItem(id: string): void {
+    processTaskTrackerRef.current.invalidate();
+    setIsProcessing(false);
     setItems((current) => {
       const targetItem = current.find((entry) => entry.id === id);
       if (targetItem?.resultUrl) {
@@ -491,6 +541,9 @@ function ImageResizeTool({ onStatusChange }: ImageResizeToolProps) {
   }
 
   function handleClearAll(): void {
+    fileTaskTrackerRef.current.invalidate();
+    processTaskTrackerRef.current.invalidate();
+    setIsProcessing(false);
     revokeResults();
     setItems([]);
     setError(null);
@@ -502,6 +555,8 @@ function ImageResizeTool({ onStatusChange }: ImageResizeToolProps) {
       return;
     }
 
+    const taskToken = processTaskTrackerRef.current.begin();
+
     if (!isDimensionValid) {
       setError('请填写有效的目标尺寸（至少为 1 像素）。');
       return;
@@ -511,12 +566,41 @@ function ImageResizeTool({ onStatusChange }: ImageResizeToolProps) {
     setIsProcessing(true);
     onStatusChange(`正在批量改尺寸，共 ${items.length} 张...`);
 
-    const results = await Promise.all(
-      items.map(async (item): Promise<ResizeItem> => {
+    const sourceItems = items.map((item) => {
+      if (item.resultUrl) {
+        URL.revokeObjectURL(item.resultUrl);
+      }
+      return {
+        ...item,
+        status: 'pending' as const,
+        resultUrl: null,
+        resultBlob: null,
+        resultWidth: null,
+        resultHeight: null,
+        error: null,
+      };
+    });
+    setItems(sourceItems);
+    const results: ResizeItem[] = [];
+    const sourceBytes = sourceItems.reduce(
+      (total, item) => total + estimateCanvasBytes(item.width, item.height),
+      0,
+    );
+
+    try {
+      for (const [index, item] of sourceItems.entries()) {
+        processTaskTrackerRef.current.assertCurrent(taskToken);
         try {
+          const target = computeTarget(item, options);
+          if (!target) throw new Error('目标尺寸无效，请检查输入。');
+          assertEstimatedCanvasBytes(
+            sourceBytes + estimateCanvasBytes(target.width, target.height, 1, 3),
+            '改尺寸任务',
+          );
           const outcome = await renderItem(item, options, picaRef.current);
+          processTaskTrackerRef.current.assertCurrent(taskToken);
           const resultUrl = URL.createObjectURL(outcome.blob);
-          return {
+          results.push({
             ...item,
             status: outcome.skipped ? 'skipped' : 'done',
             resultUrl,
@@ -524,9 +608,10 @@ function ImageResizeTool({ onStatusChange }: ImageResizeToolProps) {
             resultWidth: outcome.width,
             resultHeight: outcome.height,
             error: null,
-          };
+          });
         } catch (nextError) {
-          return {
+          if (isStaleTaskError(nextError)) throw nextError;
+          results.push({
             ...item,
             status: 'error',
             resultUrl: null,
@@ -534,18 +619,30 @@ function ImageResizeTool({ onStatusChange }: ImageResizeToolProps) {
             resultWidth: null,
             resultHeight: null,
             error: nextError instanceof Error ? nextError.message : '处理失败',
-          };
+          });
         }
-      }),
-    );
+        onStatusChange(`正在批量改尺寸 ${index + 1}/${sourceItems.length}...`);
+      }
 
-    setItems(results);
-    setIsProcessing(false);
+      processTaskTrackerRef.current.assertCurrent(taskToken);
+      setItems(results);
 
-    const done = results.filter((entry) => entry.status === 'done').length;
-    const skipped = results.filter((entry) => entry.status === 'skipped').length;
-    const failed = results.filter((entry) => entry.status === 'error').length;
-    onStatusChange(`改尺寸完成：成功 ${done} 张，跳过 ${skipped} 张，失败 ${failed} 张。`);
+      const done = results.filter((entry) => entry.status === 'done').length;
+      const skipped = results.filter((entry) => entry.status === 'skipped').length;
+      const failed = results.filter((entry) => entry.status === 'error').length;
+      onStatusChange(`改尺寸完成：成功 ${done} 张，跳过 ${skipped} 张，失败 ${failed} 张。`);
+    } catch (nextError) {
+      results.forEach((item) => {
+        if (item.resultUrl) URL.revokeObjectURL(item.resultUrl);
+      });
+      if (!isStaleTaskError(nextError)) {
+        setError(nextError instanceof Error ? nextError.message : '批量改尺寸失败。');
+      }
+    } finally {
+      if (processTaskTrackerRef.current.isCurrent(taskToken)) {
+        setIsProcessing(false);
+      }
+    }
   }
 
   function handleDownloadItem(item: ResizeItem): void {
@@ -683,6 +780,7 @@ function ImageResizeTool({ onStatusChange }: ImageResizeToolProps) {
               <SliderNumberField
                 hint="小于 100 为缩小，大于 100 为放大；可拖动滑块或直接在输入框填写自定义数值。"
                 label="缩放比例（%）"
+                numberMax={1000}
                 sliderMax={200}
                 sliderMin={10}
                 value={scalePercent}
@@ -710,6 +808,7 @@ function ImageResizeTool({ onStatusChange }: ImageResizeToolProps) {
                   <>
                     <SliderNumberField
                       label="目标宽度（px）"
+                      numberMax={MAX_IMAGE_SIDE}
                       sliderMax={3000}
                       sliderMin={16}
                       value={targetWidth}
@@ -717,6 +816,7 @@ function ImageResizeTool({ onStatusChange }: ImageResizeToolProps) {
                     />
                     <SliderNumberField
                       label="目标高度（px）"
+                      numberMax={MAX_IMAGE_SIDE}
                       sliderMax={3000}
                       sliderMin={16}
                       value={targetHeight}
@@ -728,6 +828,7 @@ function ImageResizeTool({ onStatusChange }: ImageResizeToolProps) {
                 {dimMode === 'width' ? (
                   <SliderNumberField
                     label="目标宽度（px）"
+                    numberMax={MAX_IMAGE_SIDE}
                     sliderMax={3000}
                     sliderMin={16}
                     value={targetWidth}
@@ -738,6 +839,7 @@ function ImageResizeTool({ onStatusChange }: ImageResizeToolProps) {
                 {dimMode === 'height' ? (
                   <SliderNumberField
                     label="目标高度（px）"
+                    numberMax={MAX_IMAGE_SIDE}
                     sliderMax={3000}
                     sliderMin={16}
                     value={targetHeight}
@@ -748,6 +850,7 @@ function ImageResizeTool({ onStatusChange }: ImageResizeToolProps) {
                 {dimMode === 'max' || dimMode === 'min' ? (
                   <SliderNumberField
                     label={dimMode === 'max' ? '最长边（px）' : '最短边（px）'}
+                    numberMax={MAX_IMAGE_SIDE}
                     sliderMax={3000}
                     sliderMin={16}
                     value={targetSide}

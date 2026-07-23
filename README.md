@@ -42,7 +42,7 @@
 ### 1. 序列图 PNG
 
 - 支持自定义列数
-- 支持单帧尺寸预设：`原始比例 / 32×32 / 64×64 / 128×128 / 256×256`
+- 支持单帧尺寸预设：`原始比例 / 32×32 / 64×64 / 128×128 / 256×256 / 512×512`
 - 使用 `Pica` 对单帧进行高质量缩放
 - 默认适合做 sprite sheet / timesheet
 
@@ -62,8 +62,10 @@
 
 导出内容固定为：
 
-- `skeleton.json`
-- `images/*.png`
+- `*-spine.json`
+- `*-spine.png`
+- `*-spine.atlas.txt`
+- `*-unity-sprites.json`
 - `README.txt`
 
 当前 Spine 导出策略：
@@ -72,7 +74,7 @@
 - 单插槽：默认 `sprite`
 - 单动画：默认 `idle`
 - 通过 attachment timeline 逐帧切换图片
-- 不生成 atlas
+- 生成单张图集 PNG 和对应的 Spine 图集描述
 - 不生成 `.skel`
 - 不生成 `.spine` 项目文件
 
@@ -83,15 +85,17 @@
 
 ## 技术栈
 
-- `Vite`
+- `Vite / Vinext / Next.js`
 - `React`
 - `TypeScript`
 - `JSZip`
 - `Pica`
 
-全部处理都在浏览器端完成，没有后端。
+媒体解码、裁剪、抠图和导出全部在浏览器端完成，应用不会把用户选择的媒体文件上传到服务器。默认开发与生产构建使用 Vinext；GitHub Pages 使用独立的静态 Vite 构建。
 
 ## 本地开发
+
+运行环境要求 Node.js 22.12.0 或更高版本。
 
 安装依赖：
 
@@ -108,7 +112,7 @@ npm run dev
 本地默认地址通常是：
 
 ```text
-http://localhost:5173/lunghwa-media-tools/
+http://localhost:3000/
 ```
 
 ## 测试与构建
@@ -119,10 +123,16 @@ http://localhost:5173/lunghwa-media-tools/
 npm run test
 ```
 
-构建生产版本：
+构建 Vinext/Cloudflare 生产版本：
 
 ```bash
 npm run build
+```
+
+构建 GitHub Pages 静态版本：
+
+```bash
+npm run build:pages
 ```
 
 ## GitHub Pages 部署

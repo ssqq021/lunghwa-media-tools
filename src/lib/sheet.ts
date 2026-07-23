@@ -7,6 +7,7 @@ import type {
   SheetOptions,
   VideoMeta,
 } from '../types';
+import { assertCanvasSize } from './resourceBudget';
 
 const MAX_FRAME_WIDTH = 320;
 const LABEL_FONT_SIZE = 16;
@@ -190,6 +191,7 @@ export async function renderFrameSheet(
     height: framesForRender[0]?.image.height ?? meta.height,
   };
   const metrics = getLayoutMetrics(renderMeta, framesForRender.length, sheetOptions, includeTimestamps);
+  assertCanvasSize(metrics.canvasWidth, metrics.canvasHeight, '最终序列图');
   const canvas = document.createElement('canvas');
   canvas.width = metrics.canvasWidth;
   canvas.height = metrics.canvasHeight;

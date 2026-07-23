@@ -1,4 +1,5 @@
 import type { ExtractedFrame } from '../types';
+import { assertCanvasSize } from './resourceBudget';
 
 const GIF_SIGNATURE = 'GIF89a';
 const GIF_TRAILER = 0x3b;
@@ -499,6 +500,7 @@ export async function buildAnimatedGif(
   if (width <= 0 || height <= 0) {
     throw new Error('GIF 导出失败：帧尺寸无效。');
   }
+  assertCanvasSize(width, height, 'GIF 帧');
 
   const normalizedFps = clamp(options.fps, 1, 60);
   const normalizedMaxColors = clamp(

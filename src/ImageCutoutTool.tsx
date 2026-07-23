@@ -11,6 +11,8 @@ import {
   sampleCanvasColor,
 } from './lib/chromaKey';
 import { getBaseFileName } from './lib/exportBundle';
+import { assertCanvasSize, assertFrameMemoryBudget } from './lib/resourceBudget';
+import { createLatestTaskTracker, isStaleTaskError } from './lib/latestTask';
 
 const DEFAULT_KEY_ALGORITHM: KeyAlgorithm = 'enhanced';
 const DEFAULT_TOLERANCE = 28;
@@ -63,6 +65,12 @@ function loadImageFile(file: File): Promise<HTMLCanvasElement> {
 
     image.onload = () => {
       URL.revokeObjectURL(url);
+      try {
+        assertCanvasSize(image.naturalWidth, image.naturalHeight, '源图片');
+      } catch (error) {
+        reject(error);
+        return;
+      }
       const canvas = document.createElement('canvas');
       canvas.width = image.naturalWidth;
       canvas.height = image.naturalHeight;
@@ -174,6 +182,8 @@ function ImageCutoutTool({ onStatusChange }: ImageCutoutToolProps) {
   const referenceCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const resultPanelRef = useRef<HTMLElement | null>(null);
+  const fileTaskTrackerRef = useRef(createLatestTaskTracker());
+  const renderTaskTrackerRef = useRef(createLatestTaskTracker());
 
   const cutoutFileName = useMemo(
     () => getCutoutFileName(imageName ?? 'image'),
@@ -212,11 +222,27 @@ function ImageCutoutTool({ onStatusChange }: ImageCutoutToolProps) {
 
   useEffect(() => {
     return () => {
+      fileTaskTrackerRef.current.invalidate();
+      renderTaskTrackerRef.current.invalidate();
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
       if (resultUrl) {
         URL.revokeObjectURL(resultUrl);
       }
     };
   }, [resultUrl]);
+
+  useEffect(() => {
+    renderTaskTrackerRef.current.invalidate();
+    setIsRendering(false);
+    setResultUrl((current) => {
+      if (current) URL.revokeObjectURL(current);
+      return null;
+    });
+  }, [resultFrame]);
 
   useEffect(() => {
     if (!workingFrame || !samplePoint) {
@@ -282,6 +308,9 @@ function ImageCutoutTool({ onStatusChange }: ImageCutoutToolProps) {
   }, [maskFrame, previewMode, resultFrame, solidPreviewColor, sourceFrame]);
 
   async function updateImageFile(file: File): Promise<void> {
+    const taskToken = fileTaskTrackerRef.current.begin();
+    renderTaskTrackerRef.current.invalidate();
+    setIsRendering(false);
     setError(null);
     onStatusChange('正在读取图片...');
     setSamplePoint(null);
@@ -301,10 +330,13 @@ function ImageCutoutTool({ onStatusChange }: ImageCutoutToolProps) {
 
     try {
       const canvas = await loadImageFile(file);
+      fileTaskTrackerRef.current.assertCurrent(taskToken);
+      assertFrameMemoryBudget(canvas.width, canvas.height, 1, 4, '图片抠图');
       setImageName(file.name);
       setSourceFrame(canvas);
       onStatusChange('图片已就绪，请点击背景颜色开始抠图。');
     } catch (nextError) {
+      if (!fileTaskTrackerRef.current.isCurrent(taskToken) || isStaleTaskError(nextError)) return;
       setImageName(null);
       setSourceFrame(null);
       setResultFrame(null);
@@ -381,6 +413,7 @@ function ImageCutoutTool({ onStatusChange }: ImageCutoutToolProps) {
   }
 
   async function handleGenerate(): Promise<void> {
+    const taskToken = renderTaskTrackerRef.current.begin();
     try {
       if (!resultFrame || !hasAnyColorKeyPass) {
         throw new Error('请先在图片里点击背景颜色，再生成透明抠图。');
@@ -388,6 +421,7 @@ function ImageCutoutTool({ onStatusChange }: ImageCutoutToolProps) {
 
       setIsRendering(true);
       const blob = await canvasToPngBlob(resultFrame);
+      renderTaskTrackerRef.current.assertCurrent(taskToken);
       const objectUrl = URL.createObjectURL(blob);
 
       setResultUrl((current) => {
@@ -405,24 +439,36 @@ function ImageCutoutTool({ onStatusChange }: ImageCutoutToolProps) {
         });
       }, 180);
     } catch (nextError) {
+      if (isStaleTaskError(nextError)) return;
       setError(nextError instanceof Error ? nextError.message : '生成失败。');
       onStatusChange('生成失败，请调整参数后重试。');
     } finally {
-      setIsRendering(false);
+      if (renderTaskTrackerRef.current.isCurrent(taskToken)) {
+        setIsRendering(false);
+      }
     }
   }
 
   async function handleDownload(): Promise<void> {
+    const taskToken = renderTaskTrackerRef.current.begin();
     try {
       if (!resultFrame || !hasAnyColorKeyPass) {
         throw new Error('请先在图片里点击背景颜色，再导出透明抠图。');
       }
 
-      triggerBlobDownload(await canvasToPngBlob(resultFrame), cutoutFileName);
+      setIsRendering(true);
+      const blob = await canvasToPngBlob(resultFrame);
+      renderTaskTrackerRef.current.assertCurrent(taskToken);
+      triggerBlobDownload(blob, cutoutFileName);
       onStatusChange('透明 PNG 已生成并开始下载。');
     } catch (nextError) {
+      if (isStaleTaskError(nextError)) return;
       setError(nextError instanceof Error ? nextError.message : '导出失败。');
       onStatusChange('导出失败，请稍后再试。');
+    } finally {
+      if (renderTaskTrackerRef.current.isCurrent(taskToken)) {
+        setIsRendering(false);
+      }
     }
   }
 

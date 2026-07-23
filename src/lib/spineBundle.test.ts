@@ -128,5 +128,28 @@ describe('spine bundle helpers', () => {
       'demo-clip-spine.png',
       'demo-clip-unity-sprites.json',
     ]);
+
+    const skeleton = JSON.parse(await zip.file('demo-clip-spine.json')!.async('string'));
+    const atlasDescriptor = await zip.file('demo-clip-spine.atlas.txt')!.async('string');
+    const attachments = skeleton.skins[0].attachments.sprite;
+    const attachmentNames = new Set(Object.keys(attachments));
+
+    expect(skeleton.skeleton.spine).toBe('4.2.0');
+    expect(atlasDescriptor.split('\n')[0]).toBe('demo-clip-spine.png');
+    expect(attachmentNames).toEqual(new Set([
+      'demo-clip-spine-001',
+      'demo-clip-spine-003',
+    ]));
+    for (const attachmentName of attachmentNames) {
+      expect(atlasDescriptor.split('\n')).toContain(attachmentName);
+      expect(attachments[attachmentName].path).toBe(attachmentName);
+    }
+    for (const animation of Object.values(skeleton.animations) as Array<{
+      slots: { sprite: { attachment: Array<{ name: string }> } };
+    }>) {
+      for (const key of animation.slots.sprite.attachment) {
+        expect(attachmentNames.has(key.name)).toBe(true);
+      }
+    }
   });
 });

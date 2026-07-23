@@ -2,6 +2,15 @@ import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } f
 import UPNG from 'upng-js';
 import JSZip from 'jszip';
 import { getBaseFileName } from './lib/exportBundle';
+import {
+  assertCanvasSize,
+  assertEstimatedCanvasBytes,
+  estimateCanvasBytes,
+} from './lib/resourceBudget';
+import {
+  createLatestTaskTracker,
+  isStaleTaskError,
+} from './lib/latestTask';
 
 const MAX_FILES = 50;
 const MAX_SIZE_MB = 50;
@@ -76,6 +85,12 @@ function loadImageFile(file: File): Promise<HTMLCanvasElement> {
 
     image.onload = () => {
       URL.revokeObjectURL(url);
+      try {
+        assertCanvasSize(image.naturalWidth, image.naturalHeight, '源图片');
+      } catch (error) {
+        reject(error);
+        return;
+      }
       const canvas = document.createElement('canvas');
       canvas.width = image.naturalWidth;
       canvas.height = image.naturalHeight;
@@ -213,6 +228,8 @@ function ImageCompressTool({ onStatusChange }: ImageCompressToolProps) {
 
   const inputRef = useRef<HTMLInputElement | null>(null);
   const itemsRef = useRef<CompressItem[]>([]);
+  const fileTaskTrackerRef = useRef(createLatestTaskTracker());
+  const processTaskTrackerRef = useRef(createLatestTaskTracker());
 
   itemsRef.current = items;
 
@@ -228,9 +245,16 @@ function ImageCompressTool({ onStatusChange }: ImageCompressToolProps) {
 
   useEffect(() => {
     return () => {
+      fileTaskTrackerRef.current.invalidate();
+      processTaskTrackerRef.current.invalidate();
       itemsRef.current.forEach(revokeItem);
     };
   }, []);
+
+  useEffect(() => {
+    processTaskTrackerRef.current.invalidate();
+    setIsProcessing(false);
+  }, [outFormat, qualityPercent]);
 
   const hasResults = items.some((entry) => entry.status === 'done' || entry.status === 'error');
 
@@ -239,11 +263,19 @@ function ImageCompressTool({ onStatusChange }: ImageCompressToolProps) {
       return;
     }
 
+    const taskToken = fileTaskTrackerRef.current.begin();
+    processTaskTrackerRef.current.invalidate();
+    setIsProcessing(false);
+
     setError(null);
 
     const incoming = Array.from(fileList);
     const nextItems: CompressItem[] = [];
     const rejected: string[] = [];
+    let estimatedBytes = items.reduce(
+      (total, item) => total + estimateCanvasBytes(item.width, item.height),
+      0,
+    );
 
     for (const file of incoming) {
       if (items.length + nextItems.length >= MAX_FILES) {
@@ -263,6 +295,10 @@ function ImageCompressTool({ onStatusChange }: ImageCompressToolProps) {
 
       try {
         const canvas = await loadImageFile(file);
+        fileTaskTrackerRef.current.assertCurrent(taskToken);
+        const nextEstimatedBytes = estimatedBytes + estimateCanvasBytes(canvas.width, canvas.height);
+        assertEstimatedCanvasBytes(nextEstimatedBytes, '图片列表');
+        estimatedBytes = nextEstimatedBytes;
         nextItems.push({
           id: `compress-${itemSeq}`,
           file,
@@ -282,10 +318,18 @@ function ImageCompressTool({ onStatusChange }: ImageCompressToolProps) {
         });
         itemSeq += 1;
       } catch (nextError) {
+        if (isStaleTaskError(nextError)) {
+          nextItems.forEach(revokeItem);
+          return;
+        }
         rejected.push(`${file.name}（${nextError instanceof Error ? nextError.message : '读取失败'}）`);
       }
     }
 
+    if (!fileTaskTrackerRef.current.isCurrent(taskToken)) {
+      nextItems.forEach(revokeItem);
+      return;
+    }
     if (nextItems.length > 0) {
       setItems((current) => [...current, ...nextItems]);
       onStatusChange(`已加入 ${nextItems.length} 张图片，共 ${items.length + nextItems.length} 张待压缩。`);
@@ -297,6 +341,8 @@ function ImageCompressTool({ onStatusChange }: ImageCompressToolProps) {
   }
 
   function handleRemoveItem(id: string): void {
+    processTaskTrackerRef.current.invalidate();
+    setIsProcessing(false);
     setItems((current) => {
       const targetItem = current.find((entry) => entry.id === id);
       if (targetItem) {
@@ -308,16 +354,21 @@ function ImageCompressTool({ onStatusChange }: ImageCompressToolProps) {
   }
 
   function handleClearAll(): void {
+    fileTaskTrackerRef.current.invalidate();
+    processTaskTrackerRef.current.invalidate();
+    setIsProcessing(false);
     itemsRef.current.forEach(revokeItem);
     setItems([]);
     setError(null);
     onStatusChange('已清空图片列表。');
   }
 
-  function handleProcess(): Promise<void> {
+  async function handleProcess(): Promise<void> {
     if (items.length === 0 || isProcessing) {
-      return Promise.resolve();
+      return;
     }
+
+    const taskToken = processTaskTrackerRef.current.begin();
 
     setError(null);
     setIsProcessing(true);
@@ -325,9 +376,35 @@ function ImageCompressTool({ onStatusChange }: ImageCompressToolProps) {
 
     const quality = qualityPercent / 100;
 
-    return Promise.all(
-      items.map(async (item): Promise<CompressItem> => {
+    const sourceItems = items.map((item) => {
+      if (item.resultUrl) {
+        URL.revokeObjectURL(item.resultUrl);
+      }
+      return {
+        ...item,
+        status: 'pending' as const,
+        resultUrl: null,
+        resultBlob: null,
+        resultMime: null,
+        resultSize: null,
+        error: null,
+      };
+    });
+    setItems(sourceItems);
+    const results: CompressItem[] = [];
+    const sourceBytes = sourceItems.reduce(
+      (total, item) => total + estimateCanvasBytes(item.width, item.height),
+      0,
+    );
+
+    try {
+      for (const [index, item] of sourceItems.entries()) {
+        processTaskTrackerRef.current.assertCurrent(taskToken);
         try {
+          assertEstimatedCanvasBytes(
+            sourceBytes + estimateCanvasBytes(item.width, item.height, 1, 3),
+            '压缩任务',
+          );
           const outMime = resolveOutputMime(item, outFormat);
           const out = document.createElement('canvas');
           out.width = item.width;
@@ -357,9 +434,10 @@ function ImageCompressTool({ onStatusChange }: ImageCompressToolProps) {
             context.drawImage(item.canvas, 0, 0);
             blob = await canvasToBlob(out, outMime, quality);
           }
+          processTaskTrackerRef.current.assertCurrent(taskToken);
           const resultUrl = URL.createObjectURL(blob);
 
-          return {
+          results.push({
             ...item,
             status: 'done',
             resultUrl,
@@ -367,9 +445,10 @@ function ImageCompressTool({ onStatusChange }: ImageCompressToolProps) {
             resultMime: outMime,
             resultSize: blob.size,
             error: null,
-          };
+          });
         } catch (nextError) {
-          return {
+          if (isStaleTaskError(nextError)) throw nextError;
+          results.push({
             ...item,
             status: 'error',
             resultUrl: null,
@@ -377,17 +456,29 @@ function ImageCompressTool({ onStatusChange }: ImageCompressToolProps) {
             resultMime: null,
             resultSize: null,
             error: nextError instanceof Error ? nextError.message : '压缩失败',
-          };
+          });
         }
-      }),
-    ).then((results) => {
+        onStatusChange(`正在批量压缩 ${index + 1}/${sourceItems.length}...`);
+      }
+
+      processTaskTrackerRef.current.assertCurrent(taskToken);
       setItems(results);
-      setIsProcessing(false);
 
       const done = results.filter((entry) => entry.status === 'done').length;
       const failed = results.filter((entry) => entry.status === 'error').length;
       onStatusChange(`压缩完成：成功 ${done} 张，失败 ${failed} 张。可拖动结果卡片对比原图与压缩后。`);
-    });
+    } catch (nextError) {
+      results.forEach((item) => {
+        if (item.resultUrl) URL.revokeObjectURL(item.resultUrl);
+      });
+      if (!isStaleTaskError(nextError)) {
+        setError(nextError instanceof Error ? nextError.message : '批量压缩失败。');
+      }
+    } finally {
+      if (processTaskTrackerRef.current.isCurrent(taskToken)) {
+        setIsProcessing(false);
+      }
+    }
   }
 
   function handleDownloadItem(item: CompressItem): void {
@@ -506,7 +597,9 @@ function ImageCompressTool({ onStatusChange }: ImageCompressToolProps) {
                     step={5}
                     type="range"
                     value={qualityPercent}
-                    onChange={(event) => setQualityPercent(Number(event.target.value))}
+                    onChange={(event) => setQualityPercent(
+                      Math.min(100, Math.max(10, Number(event.target.value) || 10)),
+                    )}
                   />
                   <input
                     className="range-field__num"
@@ -514,7 +607,9 @@ function ImageCompressTool({ onStatusChange }: ImageCompressToolProps) {
                     min={10}
                     type="number"
                     value={qualityPercent}
-                    onChange={(event) => setQualityPercent(Number(event.target.value))}
+                    onChange={(event) => setQualityPercent(
+                      Math.min(100, Math.max(10, Number(event.target.value) || 10)),
+                    )}
                   />
                 </div>
                 <small>10%–100%，默认 {DEFAULT_QUALITY}%。</small>

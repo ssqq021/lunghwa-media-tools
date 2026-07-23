@@ -6,6 +6,7 @@ import type {
   VideoMeta,
 } from '../types';
 import { formatTimestamp } from './time';
+import { assertCanvasSize } from './resourceBudget';
 
 type VideoAsset = {
   url: string;
@@ -103,6 +104,13 @@ export async function loadVideoAsset(file: File): Promise<VideoAsset> {
   if (!width || !height || !duration || !Number.isFinite(duration)) {
     URL.revokeObjectURL(url);
     throw new Error('无法读取视频元数据，请换一个常见编码的 MP4 文件后重试。');
+  }
+
+  try {
+    assertCanvasSize(width, height, '视频帧');
+  } catch (error) {
+    URL.revokeObjectURL(url);
+    throw error;
   }
 
   return {
@@ -271,6 +279,7 @@ export function resizeCanvas(source: HTMLCanvasElement, width?: number | null, h
     width,
     height,
   );
+  assertCanvasSize(targetWidth, targetHeight, '缩放帧');
   if (targetWidth === source.width && targetHeight === source.height) return source;
   const canvas = document.createElement('canvas');
   canvas.width = targetWidth;

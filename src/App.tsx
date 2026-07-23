@@ -1,6 +1,15 @@
 'use client';
 
-import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
+import {
+  lazy,
+  Suspense,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from 'react';
 import type {
   CropArea,
   CropBounds,
@@ -71,9 +80,27 @@ import {
   removeWatermarkFromCanvas,
   type WatermarkPass,
 } from './lib/watermark';
-import ImageCutoutTool from './ImageCutoutTool';
-import ImageResizeTool from './ImageResizeTool';
-import ImageCompressTool from './ImageCompressTool';
+import {
+  assignShadowPassesToFrames,
+  buildConnectedShadowMask,
+  buildPolygonMask,
+  removeShadowFromCanvas,
+  type ShadowPass,
+  type ShadowPoint,
+  type ShadowSelection,
+} from './lib/shadow';
+import {
+  assertFrameMemoryBudget,
+  fitDimensionsWithinSide,
+} from './lib/resourceBudget';
+import {
+  createLatestTaskTracker,
+  isStaleTaskError,
+} from './lib/latestTask';
+
+const ImageCutoutTool = lazy(() => import('./ImageCutoutTool'));
+const ImageResizeTool = lazy(() => import('./ImageResizeTool'));
+const ImageCompressTool = lazy(() => import('./ImageCompressTool'));
 
 const DEFAULT_FRAMES_PER_SECOND = 12;
 const DEFAULT_COLUMNS = 4;
@@ -84,12 +111,15 @@ const DEFAULT_SOFTNESS = 14;
 const DEFAULT_DESPILL = 50;
 const DEFAULT_EDGE_RADIUS = 22;
 const DEFAULT_SAMPLE_RADIUS = 6;
+const DEFAULT_SHADOW_TOLERANCE = 48;
 const DEFAULT_SOLID_PREVIEW_BG = '#111827';
 const DEFAULT_CROP_LEFT_PERCENT = 0;
 const DEFAULT_CROP_TOP_PERCENT = 0;
 const DEFAULT_CROP_WIDTH_PERCENT = 100;
 const DEFAULT_CROP_HEIGHT_PERCENT = 100;
 const MAX_EXTRACTED_FRAMES = 180;
+const MAX_FRAME_SIDE = 8192;
+const THUMBNAIL_SIDE = 160;
 const EXPORT_PRESETS = [
   { value: 'original', label: '原始比例', frameSize: undefined },
   { value: '32', label: '32 × 32', frameSize: 32 },
@@ -125,6 +155,8 @@ type DragSelection = {
 };
 
 type ProtectionBrushMode = 'off' | 'protect' | 'erase';
+type CleanupTool = 'watermark' | 'shadow';
+type ShadowInteractionMode = 'pen' | 'sample';
 
 type SheetPreviewConfig = {
   columns: number;
@@ -199,6 +231,76 @@ function drawCanvas(
   context.restore();
 }
 
+function attachMiddleMousePan(viewport: HTMLElement): () => void {
+  let drag:
+    | {
+        pointerId: number;
+        clientX: number;
+        clientY: number;
+        scrollLeft: number;
+        scrollTop: number;
+      }
+    | null = null;
+
+  const finishDrag = (event?: PointerEvent): void => {
+    if (!drag || (event && event.pointerId !== drag.pointerId)) {
+      return;
+    }
+
+    if (viewport.hasPointerCapture(drag.pointerId)) {
+      viewport.releasePointerCapture(drag.pointerId);
+    }
+    drag = null;
+    viewport.classList.remove('is-middle-panning');
+  };
+
+  const handlePointerDown = (event: PointerEvent): void => {
+    if (event.button !== 1) {
+      return;
+    }
+
+    drag = {
+      pointerId: event.pointerId,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      scrollLeft: viewport.scrollLeft,
+      scrollTop: viewport.scrollTop,
+    };
+    viewport.setPointerCapture(event.pointerId);
+    viewport.classList.add('is-middle-panning');
+    event.preventDefault();
+  };
+
+  const handlePointerMove = (event: PointerEvent): void => {
+    if (!drag || event.pointerId !== drag.pointerId) {
+      return;
+    }
+
+    viewport.scrollLeft = drag.scrollLeft - (event.clientX - drag.clientX);
+    viewport.scrollTop = drag.scrollTop - (event.clientY - drag.clientY);
+    event.preventDefault();
+  };
+
+  const handlePointerUp = (event: PointerEvent): void => {
+    finishDrag(event);
+  };
+
+  viewport.addEventListener('pointerdown', handlePointerDown);
+  viewport.addEventListener('pointermove', handlePointerMove);
+  viewport.addEventListener('pointerup', handlePointerUp);
+  viewport.addEventListener('pointercancel', handlePointerUp);
+  viewport.addEventListener('lostpointercapture', handlePointerUp);
+
+  return () => {
+    finishDrag();
+    viewport.removeEventListener('pointerdown', handlePointerDown);
+    viewport.removeEventListener('pointermove', handlePointerMove);
+    viewport.removeEventListener('pointerup', handlePointerUp);
+    viewport.removeEventListener('pointercancel', handlePointerUp);
+    viewport.removeEventListener('lostpointercapture', handlePointerUp);
+  };
+}
+
 function getCanvasPoint(
   event: Pick<React.PointerEvent<HTMLCanvasElement>, 'clientX' | 'clientY'>,
   canvas: HTMLCanvasElement,
@@ -232,6 +334,20 @@ function getCropAreaFromSelection(
     widthPercent: (width / sourceWidth) * 100,
     heightPercent: (height / sourceHeight) * 100,
   });
+}
+
+function createFrameThumbnailDataUrl(source: HTMLCanvasElement): string {
+  const scale = Math.min(1, THUMBNAIL_SIDE / Math.max(source.width, source.height));
+  const canvas = document.createElement('canvas');
+  canvas.width = Math.max(1, Math.round(source.width * scale));
+  canvas.height = Math.max(1, Math.round(source.height * scale));
+  const context = canvas.getContext('2d');
+  if (!context) {
+    return '';
+  }
+
+  context.drawImage(source, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL('image/png');
 }
 
 function getPixelBoundsFromSelection(
@@ -332,10 +448,14 @@ function drawProtectionOverlay(
   context.putImageData(imageData, 0, 0);
 }
 
-function drawWatermarkSelectionCanvas(
+function drawCleanupSelectionCanvas(
   target: HTMLCanvasElement | null,
   source: HTMLCanvasElement | null,
+  tool: CleanupTool,
   rect?: CropBounds | null,
+  shadowPoints: ShadowPoint[] = [],
+  shadowPathClosed = false,
+  shadowSelection?: ShadowSelection | null,
 ): void {
   if (!target || !source) {
     return;
@@ -352,17 +472,87 @@ function drawWatermarkSelectionCanvas(
   context.clearRect(0, 0, target.width, target.height);
   context.drawImage(source, 0, 0);
 
-  if (!rect) {
+  if (tool === 'watermark') {
+    if (!rect) {
+      return;
+    }
+
+    context.save();
+    context.fillStyle = 'rgba(239, 68, 68, 0.18)';
+    context.fillRect(rect.x, rect.y, rect.width, rect.height);
+    context.strokeStyle = '#ef4444';
+    context.lineWidth = Math.max(2, source.width / 240);
+    context.setLineDash([10, 8]);
+    context.strokeRect(rect.x, rect.y, rect.width, rect.height);
+    context.restore();
+    return;
+  }
+
+  if (shadowSelection) {
+    const imageData = context.getImageData(0, 0, target.width, target.height);
+    const mask = buildConnectedShadowMask(
+      imageData,
+      target.width,
+      target.height,
+      shadowSelection,
+    );
+    const pixels = imageData.data;
+    for (let index = 0; index < mask.length; index += 1) {
+      if (!mask[index]) {
+        continue;
+      }
+
+      const offset = index * 4;
+      pixels[offset] = Math.round(pixels[offset] * 0.5 + 124 * 0.5);
+      pixels[offset + 1] = Math.round(pixels[offset + 1] * 0.5 + 58 * 0.5);
+      pixels[offset + 2] = Math.round(pixels[offset + 2] * 0.5 + 237 * 0.5);
+    }
+    context.putImageData(imageData, 0, 0);
+  }
+
+  if (!shadowPoints.length) {
     return;
   }
 
   context.save();
-  context.fillStyle = 'rgba(239, 68, 68, 0.18)';
-  context.fillRect(rect.x, rect.y, rect.width, rect.height);
-  context.strokeStyle = '#ef4444';
+  context.beginPath();
+  context.moveTo(shadowPoints[0].x, shadowPoints[0].y);
+  for (const point of shadowPoints.slice(1)) {
+    context.lineTo(point.x, point.y);
+  }
+  if (shadowPathClosed) {
+    context.closePath();
+    context.fillStyle = 'rgba(124, 58, 237, 0.08)';
+    context.fill();
+  }
+  context.strokeStyle = '#7c3aed';
   context.lineWidth = Math.max(2, source.width / 240);
-  context.setLineDash([10, 8]);
-  context.strokeRect(rect.x, rect.y, rect.width, rect.height);
+  context.stroke();
+
+  const anchorRadius = Math.max(4, source.width / 120);
+  for (const [index, point] of shadowPoints.entries()) {
+    context.beginPath();
+    context.arc(point.x, point.y, anchorRadius, 0, Math.PI * 2);
+    context.fillStyle = index === 0 ? '#f97316' : '#ffffff';
+    context.fill();
+    context.strokeStyle = '#7c3aed';
+    context.lineWidth = Math.max(2, source.width / 300);
+    context.stroke();
+  }
+
+  if (shadowSelection) {
+    context.beginPath();
+    context.arc(
+      shadowSelection.seed.x,
+      shadowSelection.seed.y,
+      Math.max(7, source.width / 80),
+      0,
+      Math.PI * 2,
+    );
+    context.strokeStyle = '#f97316';
+    context.lineWidth = Math.max(2, source.width / 240);
+    context.stroke();
+  }
   context.restore();
 }
 
@@ -462,6 +652,14 @@ function App() {
   const [watermarkDragSelection, setWatermarkDragSelection] = useState<DragSelection | null>(null);
   const [watermarkRect, setWatermarkRect] = useState<CropBounds | null>(null);
   const [watermarkPasses, setWatermarkPasses] = useState<WatermarkPass[]>([]);
+  const [cleanupTool, setCleanupTool] = useState<CleanupTool>('watermark');
+  const [shadowPoints, setShadowPoints] = useState<ShadowPoint[]>([]);
+  const [shadowPathClosed, setShadowPathClosed] = useState(false);
+  const [shadowInteractionMode, setShadowInteractionMode] = useState<ShadowInteractionMode>('pen');
+  const [shadowSample, setShadowSample] = useState<ColorSample | null>(null);
+  const [shadowTolerance, setShadowTolerance] = useState(DEFAULT_SHADOW_TOLERANCE);
+  const [shadowPasses, setShadowPasses] = useState<ShadowPass[]>([]);
+  const [watermarkCanvasZoom, setWatermarkCanvasZoom] = useState(100);
   const [frameSelection, setFrameSelection] = useState<FrameSelection | null>(null);
   const [samplePoint, setSamplePoint] = useState<SamplePoint | null>(null);
   const [colorSample, setColorSample] = useState<ColorSample | null>(null);
@@ -503,6 +701,7 @@ function App() {
   const referenceCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const previewCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const watermarkCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const watermarkCanvasViewportRef = useRef<HTMLDivElement | null>(null);
   const segmentPreviewVideoRef = useRef<HTMLVideoElement | null>(null);
   const watermarkVideoRef = useRef<HTMLVideoElement | null>(null);
   const resultAnimationCanvasRef = useRef<HTMLCanvasElement | null>(null);
@@ -532,6 +731,9 @@ function App() {
   const protectionMaskRef = useRef<Uint8Array | null>(null);
   const protectionPaintingRef = useRef(false);
   const protectionLastPointRef = useRef<MaskPoint | null>(null);
+  const shadowDraggingPointRef = useRef<number | null>(null);
+  const fileTaskTrackerRef = useRef(createLatestTaskTracker());
+  const renderTaskTrackerRef = useRef(createLatestTaskTracker());
 
   const sheetOptions: SheetOptions = {
     columns,
@@ -690,12 +892,16 @@ function App() {
     );
   }, [extractedFrames, normalizedFrameSelection, processedFrames]);
   const frameThumbnailUrls = useMemo(
-    () => extractedFrames?.map((frame) => frame.image.toDataURL('image/png')) ?? [],
+    () => extractedFrames?.map((frame) => createFrameThumbnailDataUrl(frame.image)) ?? [],
     [extractedFrames],
   );
   const watermarkAssignments = useMemo(
     () => assignWatermarkPassesToFrames(sampleTimes, watermarkPasses),
     [sampleTimes, watermarkPasses],
+  );
+  const shadowAssignments = useMemo(
+    () => assignShadowPassesToFrames(sampleTimes, shadowPasses),
+    [sampleTimes, shadowPasses],
   );
   const currentWatermarkRects = useMemo(() => {
     const frameTime = getNearestFrameTime(sampleTimes, referenceTime);
@@ -705,6 +911,14 @@ function App() {
 
     return watermarkAssignments[sampleTimes.indexOf(frameTime)] ?? [];
   }, [referenceTime, sampleTimes, watermarkAssignments]);
+  const currentShadowSelections = useMemo(() => {
+    const frameTime = getNearestFrameTime(sampleTimes, referenceTime);
+    if (frameTime === null) {
+      return [];
+    }
+
+    return shadowAssignments[sampleTimes.indexOf(frameTime)] ?? [];
+  }, [referenceTime, sampleTimes, shadowAssignments]);
   const referenceFrameAfterWatermark = useMemo(() => {
     if (!referenceFrame) {
       return null;
@@ -715,6 +929,16 @@ function App() {
       referenceFrame,
     );
   }, [currentWatermarkRects, referenceFrame]);
+  const referenceFrameAfterCleanup = useMemo(() => {
+    if (!referenceFrameAfterWatermark) {
+      return null;
+    }
+
+    return currentShadowSelections.reduce(
+      (current, selection) => removeShadowFromCanvas(current, selection),
+      referenceFrameAfterWatermark,
+    );
+  }, [currentShadowSelections, referenceFrameAfterWatermark]);
   const activeWatermarkRect = useMemo<CropBounds | null>(
     () =>
       watermarkDragSelection && referenceFrame
@@ -726,6 +950,18 @@ function App() {
           )
         : watermarkRect,
     [referenceFrame, watermarkDragSelection, watermarkRect],
+  );
+  const activeShadowSelection = useMemo<ShadowSelection | null>(
+    () =>
+      shadowPathClosed && shadowSample
+        ? {
+            points: shadowPoints,
+            seed: { x: shadowSample.x, y: shadowSample.y },
+            sample: shadowSample.rgb,
+            tolerance: shadowTolerance,
+          }
+        : null,
+    [shadowPathClosed, shadowPoints, shadowSample, shadowTolerance],
   );
   const framePreviewRefreshKey = useMemo(
     () => `${sheetPreviewConfigKey}|${frameSelectionSignature}`,
@@ -781,6 +1017,28 @@ function App() {
     () => protectionMask?.reduce((count, value) => count + (value ? 1 : 0), 0) ?? 0,
     [protectionMask],
   );
+  const generationBudgetError = useMemo(() => {
+    if (!outputVideoMeta || estimatedFrameCount < 1) return null;
+
+    try {
+      assertFrameMemoryBudget(
+        outputVideoMeta.width,
+        outputVideoMeta.height,
+        estimatedFrameCount,
+        1 + (watermarkPasses.length || shadowPasses.length ? 1 : 0) + (activeColorKeySequence.length ? 2 : 0),
+        '抽帧任务',
+      );
+      return null;
+    } catch (nextError) {
+      return nextError instanceof Error ? nextError.message : '当前任务超出浏览器安全预算。';
+    }
+  }, [
+    activeColorKeySequence.length,
+    estimatedFrameCount,
+    outputVideoMeta,
+    shadowPasses.length,
+    watermarkPasses.length,
+  ]);
 
   const isCutoutMode = appMode === 'cutout';
   const isResizeMode = appMode === 'resize';
@@ -792,7 +1050,8 @@ function App() {
       isChromaStageOpen &&
       !isRendering &&
       estimatedFrameCount > 0 &&
-      !frameLimitExceeded,
+      !frameLimitExceeded &&
+      !generationBudgetError,
   );
   const showChromaStage = Boolean(videoMeta && isChromaStageOpen);
   const showFramePickerStage = Boolean(isSheetMode && extractedFrames?.length);
@@ -856,7 +1115,18 @@ function App() {
     setProtectionBrushMode('off');
   }
 
+  function resetShadowDraft(): void {
+    shadowDraggingPointRef.current = null;
+    setShadowPoints([]);
+    setShadowPathClosed(false);
+    setShadowInteractionMode('pen');
+    setShadowSample(null);
+    setShadowTolerance(DEFAULT_SHADOW_TOLERANCE);
+  }
+
   function clearDerivedOutputs(nextStatus?: string): void {
+    renderTaskTrackerRef.current.invalidate();
+    setIsRendering(false);
     pendingResultScrollRef.current = false;
     pendingResultScrollTopRef.current = null;
     pendingSpineScrollRef.current = false;
@@ -887,6 +1157,18 @@ function App() {
     clearDerivedOutputs(nextStatus);
   }
 
+  function beginRenderTask(): number {
+    const taskToken = renderTaskTrackerRef.current.begin();
+    setIsRendering(true);
+    return taskToken;
+  }
+
+  function finishRenderTask(taskToken: number): void {
+    if (renderTaskTrackerRef.current.isCurrent(taskToken)) {
+      setIsRendering(false);
+    }
+  }
+
   useEffect(() => {
     latestVideoUrlRef.current = videoUrl;
   }, [videoUrl]);
@@ -897,6 +1179,8 @@ function App() {
 
   useEffect(() => {
     return () => {
+      fileTaskTrackerRef.current.invalidate();
+      renderTaskTrackerRef.current.invalidate();
       disposeReferenceReader();
       if (autoPreviewTimerRef.current !== null) {
         window.clearTimeout(autoPreviewTimerRef.current);
@@ -1115,7 +1399,7 @@ function App() {
   }, [referenceCommittedFrame, samplePoint]);
 
   useEffect(() => {
-    if (!referenceFrameAfterWatermark) {
+    if (!referenceFrameAfterCleanup) {
       setReferenceCommittedFrame(null);
       setReferenceResultFrame(null);
       setReferenceMaskFrame(null);
@@ -1124,9 +1408,9 @@ function App() {
 
     try {
       const committedPreview = hasCommittedColorKeys
-        ? applyColorKeySequence(referenceFrameAfterWatermark, committedColorKeys, protectionMask)
+        ? applyColorKeySequence(referenceFrameAfterCleanup, committedColorKeys, protectionMask)
         : null;
-      const committedFrame = committedPreview?.image ?? referenceFrameAfterWatermark;
+      const committedFrame = committedPreview?.image ?? referenceFrameAfterCleanup;
 
       setReferenceCommittedFrame(committedFrame);
 
@@ -1142,7 +1426,7 @@ function App() {
     } catch (nextError) {
       setError(nextError instanceof Error ? nextError.message : '参考帧预览失败。');
     }
-  }, [colorKeyOptions, committedColorKeys, hasCommittedColorKeys, protectionMask, referenceFrameAfterWatermark]);
+  }, [colorKeyOptions, committedColorKeys, hasCommittedColorKeys, protectionMask, referenceFrameAfterCleanup]);
 
   useEffect(() => {
     drawCanvas(referenceCanvasRef.current, referenceCommittedFrame, samplePoint);
@@ -1165,12 +1449,59 @@ function App() {
   }, [activeCropArea, referenceRawFrame]);
 
   useEffect(() => {
-    drawWatermarkSelectionCanvas(
+    drawCleanupSelectionCanvas(
       watermarkCanvasRef.current,
-      referenceFrameAfterWatermark,
+      referenceFrameAfterCleanup,
+      cleanupTool,
       activeWatermarkRect,
+      shadowPoints,
+      shadowPathClosed,
+      activeShadowSelection,
     );
-  }, [activeWatermarkRect, referenceFrameAfterWatermark]);
+  }, [
+    activeShadowSelection,
+    activeWatermarkRect,
+    cleanupTool,
+    referenceFrameAfterCleanup,
+    shadowPathClosed,
+    shadowPoints,
+  ]);
+
+  useEffect(() => {
+    const viewport = watermarkCanvasViewportRef.current;
+    if (!viewport || !showChromaStage) {
+      return;
+    }
+
+    const handleWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      const cursorX = event.clientX - viewport.getBoundingClientRect().left + viewport.scrollLeft;
+      const cursorY = event.clientY - viewport.getBoundingClientRect().top + viewport.scrollTop;
+      const visibleX = event.clientX - viewport.getBoundingClientRect().left;
+      const visibleY = event.clientY - viewport.getBoundingClientRect().top;
+
+      setWatermarkCanvasZoom((current) => {
+        const next = adjustPreviewZoom(current, event.deltaY < 0 ? 1 : -1);
+        if (next === current) {
+          return current;
+        }
+
+        const scale = next / current;
+        window.requestAnimationFrame(() => {
+          viewport.scrollLeft = cursorX * scale - visibleX;
+          viewport.scrollTop = cursorY * scale - visibleY;
+        });
+        return next;
+      });
+    };
+
+    const detachPan = attachMiddleMousePan(viewport);
+    viewport.addEventListener('wheel', handleWheel, { passive: false });
+    return () => {
+      detachPan();
+      viewport.removeEventListener('wheel', handleWheel);
+    };
+  }, [showChromaStage]);
 
   useEffect(() => {
     const source =
@@ -1337,8 +1668,12 @@ function App() {
       event.preventDefault();
       setAnimationZoom((current) => adjustPreviewZoom(current, event.deltaY < 0 ? 1 : -1));
     };
+    const detachPan = attachMiddleMousePan(preview);
     preview.addEventListener('wheel', handleWheel, { passive: false });
-    return () => preview.removeEventListener('wheel', handleWheel);
+    return () => {
+      detachPan();
+      preview.removeEventListener('wheel', handleWheel);
+    };
   }, [result, resultPreviewMode]);
 
   useEffect(() => {
@@ -1391,7 +1726,7 @@ function App() {
   ]);
 
   useEffect(() => {
-    if (!showResultStage || autoPreviewInFlightRef.current) {
+    if (!showResultStage) {
       return;
     }
 
@@ -1399,22 +1734,31 @@ function App() {
       return;
     }
 
+    renderTaskTrackerRef.current.invalidate();
+    autoPreviewInFlightRef.current = false;
+    setIsRendering(false);
+
     if (autoPreviewTimerRef.current !== null) {
       window.clearTimeout(autoPreviewTimerRef.current);
     }
 
     autoPreviewTimerRef.current = window.setTimeout(() => {
       autoPreviewTimerRef.current = null;
+      const taskToken = beginRenderTask();
       autoPreviewInFlightRef.current = true;
       setError(null);
       setStatus('参数已更新，正在自动刷新序列图...');
-      void renderSheetPreview()
+      void renderSheetPreview(taskToken)
         .catch((nextError) => {
+          if (isStaleTaskError(nextError)) return;
           setError(nextError instanceof Error ? nextError.message : '自动预览失败。');
           setStatus('自动预览失败，请稍后重试。');
         })
         .finally(() => {
-          autoPreviewInFlightRef.current = false;
+          if (renderTaskTrackerRef.current.isCurrent(taskToken)) {
+            autoPreviewInFlightRef.current = false;
+          }
+          finishRenderTask(taskToken);
         });
     }, 220);
 
@@ -1471,10 +1815,13 @@ function App() {
     setWatermarkRect(null);
     setWatermarkDragSelection(null);
     setWatermarkPasses([]);
+    setWatermarkCanvasZoom(100);
+    resetShadowDraft();
+    setShadowPasses([]);
     resetProtectionMask();
     if (extractedFrames || processedFrames || result) {
       setFrameSelection(null);
-      clearGeneratedAssets('裁剪范围或视频已更新，请重新设置去水印区域并抽帧。');
+      clearGeneratedAssets('裁剪范围或视频已更新，请重新设置去水印或去阴影区域并抽帧。');
     }
   }, [
     cropArea.heightPercent,
@@ -1487,6 +1834,7 @@ function App() {
   ]);
 
   async function updateFile(file: File): Promise<void> {
+    const taskToken = fileTaskTrackerRef.current.begin();
     setError(null);
     setStatus('正在读取视频元数据...');
 
@@ -1510,6 +1858,10 @@ function App() {
     setWatermarkRect(null);
     setWatermarkDragSelection(null);
     setWatermarkPasses([]);
+    setCleanupTool('watermark');
+    setWatermarkCanvasZoom(100);
+    resetShadowDraft();
+    setShadowPasses([]);
     setIsChromaStageOpen(false);
     pendingChromaScrollRef.current = false;
     pendingChromaScrollTopRef.current = null;
@@ -1524,6 +1876,10 @@ function App() {
 
     try {
       const asset = await loadVideoAsset(file);
+      if (!fileTaskTrackerRef.current.isCurrent(taskToken)) {
+        revokeVideoAsset(asset.url);
+        return;
+      }
       setVideoMeta(asset.meta);
       setVideoUrl(asset.url);
       setSegmentStart(0);
@@ -1533,6 +1889,9 @@ function App() {
       setStatus('视频已就绪，请先选择视频片段并预览，再裁剪画面。');
       scrollToStep(cropPanelRef);
     } catch (nextError) {
+      if (!fileTaskTrackerRef.current.isCurrent(taskToken) || isStaleTaskError(nextError)) {
+        return;
+      }
       setVideoMeta(null);
       setStatus('读取失败，请换一个文件后重试。');
       setError(nextError instanceof Error ? nextError.message : '读取视频失败。');
@@ -1551,6 +1910,7 @@ function App() {
   async function applyWatermarkToFrames(
     frames: ExtractedFrame[],
     passes: WatermarkPass[],
+    taskToken: number,
   ): Promise<ExtractedFrame[]> {
     if (!passes.length) {
       return frames;
@@ -1563,6 +1923,7 @@ function App() {
     const nextFrames: ExtractedFrame[] = [];
 
     for (const [index, frame] of frames.entries()) {
+      renderTaskTrackerRef.current.assertCurrent(taskToken);
       const rects = assignments[index];
       if (!rects.length) {
         nextFrames.push(frame);
@@ -1585,6 +1946,45 @@ function App() {
     return nextFrames;
   }
 
+  async function applyShadowToFrames(
+    frames: ExtractedFrame[],
+    passes: ShadowPass[],
+    taskToken: number,
+  ): Promise<ExtractedFrame[]> {
+    if (!passes.length) {
+      return frames;
+    }
+
+    const assignments = assignShadowPassesToFrames(
+      frames.map((frame) => frame.time),
+      passes,
+    );
+    const nextFrames: ExtractedFrame[] = [];
+
+    for (const [index, frame] of frames.entries()) {
+      renderTaskTrackerRef.current.assertCurrent(taskToken);
+      const selections = assignments[index];
+      if (!selections.length) {
+        nextFrames.push(frame);
+        continue;
+      }
+
+      setStatus(`正在执行第 ${index + 1} 帧去阴影...`);
+      nextFrames.push({
+        ...frame,
+        image: selections.reduce(
+          (current, selection) => removeShadowFromCanvas(current, selection),
+          frame.image,
+        ),
+      });
+      if (index < frames.length - 1) {
+        await nextFrame();
+      }
+    }
+
+    return nextFrames;
+  }
+
   function getSelectedAssetsOrThrow(assets: GeneratedAssets): GeneratedAssets {
     const nextAssets = filterAssetsBySelection(assets, normalizedFrameSelection);
     if (!nextAssets.frames.length) {
@@ -1594,7 +1994,8 @@ function App() {
     return nextAssets;
   }
 
-  async function generateAssets(): Promise<GeneratedAssets> {
+  async function generateAssets(taskToken: number): Promise<GeneratedAssets> {
+    renderTaskTrackerRef.current.assertCurrent(taskToken);
     if (!videoMeta || !videoUrl) {
       throw new Error('请先上传一个视频文件。');
     }
@@ -1603,68 +2004,91 @@ function App() {
       throw new Error(`当前片段预计会提取 ${estimatedFrameCount} 帧，请缩短片段或降低每秒帧数。`);
     }
 
+    const outputWidth = resizeWidth ?? cropBounds?.width ?? videoMeta.width;
+    const outputHeight = resizeHeight ?? cropBounds?.height ?? videoMeta.height;
+    const retainedSurfaceCount = 1
+      + (watermarkPasses.length || shadowPasses.length ? 1 : 0)
+      + (activeColorKeySequence.length ? 2 : 0);
+    assertFrameMemoryBudget(
+      outputWidth,
+      outputHeight,
+      estimatedFrameCount,
+      retainedSurfaceCount,
+      '抽帧任务',
+    );
+
     setError(null);
-    setIsRendering(true);
 
-    try {
-      setStatus(`正在抽取序列帧 0/${estimatedFrameCount}...`);
-      const frames = await extractFrames(
-        videoUrl,
-        videoMeta,
-        {
-          framesPerSecond,
-          segmentStart,
-          segmentEnd,
-          cropArea,
-          resizeWidth,
-          resizeHeight,
-        },
-        (current, total) => {
-          setStatus(`正在抽取序列帧 ${current}/${total}...`);
-        },
-      );
-      const framesWithWatermarkHandled = await applyWatermarkToFrames(frames, watermarkPasses);
-      setFrameSelection((current) =>
-        current
-          ? normalizeFrameSelection(current, framesWithWatermarkHandled.length)
-          : createFrameSelection(framesWithWatermarkHandled.length),
-      );
+    setStatus(`正在抽取序列帧 0/${estimatedFrameCount}...`);
+    const frames = await extractFrames(
+      videoUrl,
+      videoMeta,
+      {
+        framesPerSecond,
+        segmentStart,
+        segmentEnd,
+        cropArea,
+        resizeWidth,
+        resizeHeight,
+      },
+      (current, total) => {
+        renderTaskTrackerRef.current.assertCurrent(taskToken);
+        setStatus(`正在抽取序列帧 ${current}/${total}...`);
+      },
+    );
+    renderTaskTrackerRef.current.assertCurrent(taskToken);
+    const framesWithWatermarkHandled = await applyWatermarkToFrames(
+      frames,
+      watermarkPasses,
+      taskToken,
+    );
+    renderTaskTrackerRef.current.assertCurrent(taskToken);
+    const framesWithCleanupHandled = await applyShadowToFrames(
+      framesWithWatermarkHandled,
+      shadowPasses,
+      taskToken,
+    );
+    renderTaskTrackerRef.current.assertCurrent(taskToken);
+    setFrameSelection((current) =>
+      current
+        ? normalizeFrameSelection(current, framesWithCleanupHandled.length)
+        : createFrameSelection(framesWithCleanupHandled.length),
+    );
 
-      if (!activeColorKeySequence.length) {
-        setExtractedFrames(framesWithWatermarkHandled);
-        setProcessedFrames(null);
-
-        return {
-          frames: framesWithWatermarkHandled,
-          processed: null,
-        };
-      }
-
-      const nextProcessedFrames: ProcessedFrame[] = [];
-
-      for (const [index, frame] of framesWithWatermarkHandled.entries()) {
-        setStatus(`正在执行 ChromaKey 抠像 ${index + 1}/${framesWithWatermarkHandled.length}...`);
-        nextProcessedFrames.push(
-          processExtractedFrameWithSequence(frame, activeColorKeySequence, protectionMask),
-        );
-        if (index < framesWithWatermarkHandled.length - 1) {
-          await nextFrame();
-        }
-      }
-
-      setExtractedFrames(framesWithWatermarkHandled);
-      setProcessedFrames(nextProcessedFrames);
+    if (!activeColorKeySequence.length) {
+      setExtractedFrames(framesWithCleanupHandled);
+      setProcessedFrames(null);
 
       return {
-        frames: framesWithWatermarkHandled,
-        processed: nextProcessedFrames,
+        frames: framesWithCleanupHandled,
+        processed: null,
       };
-    } finally {
-      setIsRendering(false);
     }
+
+    const nextProcessedFrames: ProcessedFrame[] = [];
+
+    for (const [index, frame] of framesWithCleanupHandled.entries()) {
+      renderTaskTrackerRef.current.assertCurrent(taskToken);
+      setStatus(`正在执行 ChromaKey 抠像 ${index + 1}/${framesWithCleanupHandled.length}...`);
+      nextProcessedFrames.push(
+        processExtractedFrameWithSequence(frame, activeColorKeySequence, protectionMask),
+      );
+      if (index < framesWithCleanupHandled.length - 1) {
+        await nextFrame();
+      }
+    }
+
+    setExtractedFrames(framesWithCleanupHandled);
+    setProcessedFrames(nextProcessedFrames);
+
+    return {
+      frames: framesWithCleanupHandled,
+      processed: nextProcessedFrames,
+    };
   }
 
-  async function ensureAssets(): Promise<GeneratedAssets> {
+  async function ensureAssets(taskToken: number): Promise<GeneratedAssets> {
+    renderTaskTrackerRef.current.assertCurrent(taskToken);
     if (extractedFrames) {
       return {
         frames: extractedFrames,
@@ -1672,15 +2096,19 @@ function App() {
       };
     }
 
-    return generateAssets();
+    return generateAssets(taskToken);
   }
 
-  async function renderSheetPreview(assets?: GeneratedAssets): Promise<SheetPreviewResult> {
+  async function renderSheetPreview(
+    taskToken: number,
+    assets?: GeneratedAssets,
+  ): Promise<SheetPreviewResult> {
+    renderTaskTrackerRef.current.assertCurrent(taskToken);
     if (!outputVideoMeta) {
       throw new Error('请先上传视频。');
     }
 
-    const currentAssets = getSelectedAssetsOrThrow(assets ?? (await ensureAssets()));
+    const currentAssets = getSelectedAssetsOrThrow(assets ?? (await ensureAssets(taskToken)));
     const transparent = Boolean(currentAssets.processed);
     const framesForRender = currentAssets.processed
       ? toTransparentSheetFrames(currentAssets.processed)
@@ -1694,6 +2122,10 @@ function App() {
       false,
       getSheetAppearance(transparent),
     );
+    if (!renderTaskTrackerRef.current.isCurrent(taskToken)) {
+      URL.revokeObjectURL(renderResult.objectUrl);
+      renderTaskTrackerRef.current.assertCurrent(taskToken);
+    }
 
     replacePreviewResult(renderResult, transparent);
     lastSheetPreviewConfigRef.current = framePreviewRefreshKey;
@@ -1706,54 +2138,67 @@ function App() {
   }
 
   async function handleGeneratePreview(): Promise<void> {
+    const taskToken = beginRenderTask();
     try {
-      const assets = await generateAssets();
-      await renderSheetPreview(assets);
+      const assets = await generateAssets(taskToken);
+      await renderSheetPreview(taskToken, assets);
+      renderTaskTrackerRef.current.assertCurrent(taskToken);
       setResultPreviewMode('animation');
       scrollToStep(resultPanelRef);
     } catch (nextError) {
+      if (isStaleTaskError(nextError)) return;
       setError(nextError instanceof Error ? nextError.message : '生成失败。');
       setStatus('生成失败，请调整参数后重试。');
+    } finally {
+      finishRenderTask(taskToken);
     }
   }
 
   async function handleDownloadSheet(): Promise<void> {
+    const taskToken = beginRenderTask();
     try {
-      const preview = await renderSheetPreview();
+      const preview = await renderSheetPreview(taskToken);
+      renderTaskTrackerRef.current.assertCurrent(taskToken);
       triggerBlobDownload(
         preview.renderResult.blob,
         getSheetFileName(baseFileName, preview.transparent),
       );
     } catch (nextError) {
+      if (isStaleTaskError(nextError)) return;
       setError(nextError instanceof Error ? nextError.message : '导出失败。');
       setStatus('导出失败，请稍后再试。');
+    } finally {
+      finishRenderTask(taskToken);
     }
   }
 
   async function handleDownloadZip(): Promise<void> {
+    const taskToken = beginRenderTask();
     try {
-      const assets = getSelectedAssetsOrThrow(await ensureAssets());
+      const assets = getSelectedAssetsOrThrow(await ensureAssets(taskToken));
       if (!assets.processed) {
         throw new Error('透明帧 ZIP 需要先启用背景扣像并完成取色。');
       }
 
       setError(null);
-      setIsRendering(true);
       setStatus('正在打包透明 PNG ZIP...');
       const blob = await buildTransparentFramesZip(assets.processed, baseFileName);
+      renderTaskTrackerRef.current.assertCurrent(taskToken);
       triggerBlobDownload(blob, getZipFileName(baseFileName));
       setStatus('透明 PNG ZIP 已生成并开始下载。');
     } catch (nextError) {
+      if (isStaleTaskError(nextError)) return;
       setError(nextError instanceof Error ? nextError.message : '打包 ZIP 失败。');
       setStatus('ZIP 导出失败，请稍后再试。');
     } finally {
-      setIsRendering(false);
+      finishRenderTask(taskToken);
     }
   }
 
   async function handleDownloadGif(): Promise<void> {
+    const taskToken = beginRenderTask();
     try {
-      const assets = getSelectedAssetsOrThrow(await ensureAssets());
+      const assets = getSelectedAssetsOrThrow(await ensureAssets(taskToken));
       const transparent = Boolean(assets.processed);
       const framesForGif = transparent
         ? toTransparentSheetFrames(assets.processed ?? [])
@@ -1764,13 +2209,20 @@ function App() {
       }
 
       setError(null);
-      setIsRendering(true);
       setStatus('正在分析 GIF 调色板...');
+      assertFrameMemoryBudget(
+        framesForGif[0].image.width,
+        framesForGif[0].image.height,
+        framesForGif.length,
+        transparent ? 4 : 2,
+        'GIF 导出',
+      );
 
       const blob = await buildAnimatedGif(framesForGif, {
         fps: framesPerSecond,
         transparent,
         onProgress: (progress) => {
+          renderTaskTrackerRef.current.assertCurrent(taskToken);
           if (progress.phase === 'palette') {
             setStatus(`正在分析 GIF 调色板 ${progress.current}/${progress.total}...`);
             return;
@@ -1780,24 +2232,28 @@ function App() {
         },
       });
 
+      renderTaskTrackerRef.current.assertCurrent(taskToken);
       triggerBlobDownload(blob, getGifFileName(baseFileName, transparent));
       setStatus('GIF 已生成并开始下载。');
     } catch (nextError) {
+      if (isStaleTaskError(nextError)) return;
       setError(nextError instanceof Error ? nextError.message : 'GIF 导出失败。');
       setStatus('GIF 导出失败，请稍后再试。');
     } finally {
-      setIsRendering(false);
+      finishRenderTask(taskToken);
     }
   }
 
   async function handleOpenSpineWorkspace(): Promise<void> {
+    const taskToken = beginRenderTask();
     try {
       if (!outputVideoMeta) {
         throw new Error('请先上传视频并生成可用帧数据。');
       }
 
       setError(null);
-      const assets = getSelectedAssetsOrThrow(await ensureAssets());
+      const assets = getSelectedAssetsOrThrow(await ensureAssets(taskToken));
+      renderTaskTrackerRef.current.assertCurrent(taskToken);
       const nextDraft = buildSpineDraftFromAssets(
         assets,
         baseFileName,
@@ -1820,10 +2276,13 @@ function App() {
       setSpineAnimationPlaying(true);
       setStatus('Spine 动画工作区已准备好，可以继续预览或下载 Spine ZIP。');
     } catch (nextError) {
+      if (isStaleTaskError(nextError)) return;
       pendingSpineScrollRef.current = false;
       pendingSpineScrollTopRef.current = null;
       setError(nextError instanceof Error ? nextError.message : '打开 Spine 工作区失败。');
       setStatus('Spine 工作区打开失败，请稍后重试。');
+    } finally {
+      finishRenderTask(taskToken);
     }
   }
 
@@ -1872,13 +2331,13 @@ function App() {
   }
 
   async function handleDownloadSpineZip(): Promise<void> {
+    const taskToken = beginRenderTask();
     try {
       if (!spineDraft) {
         throw new Error('请先进入 Spine 动画工作区。');
       }
 
       setError(null);
-      setIsRendering(true);
       setStatus('正在按第 7 步排布生成单张 Spine 图集 PNG + JSON ZIP...');
       const usedFrameIndices = getUsedSpineFrameIndices(
         spineOptions.animations,
@@ -1906,19 +2365,25 @@ function App() {
         getSheetAppearance(spineDraft.transparent),
         false,
       );
+      if (!renderTaskTrackerRef.current.isCurrent(taskToken)) {
+        URL.revokeObjectURL(atlas.objectUrl);
+        renderTaskTrackerRef.current.assertCurrent(taskToken);
+      }
       let blob: Blob;
       try {
         blob = await buildSpineBundleZip(exportDraft, spineOptions, atlas);
       } finally {
         URL.revokeObjectURL(atlas.objectUrl);
       }
+      renderTaskTrackerRef.current.assertCurrent(taskToken);
       triggerBlobDownload(blob, getSpineZipFileName(spineDraft.baseName));
       setStatus('Spine ZIP 已生成并开始下载。');
     } catch (nextError) {
+      if (isStaleTaskError(nextError)) return;
       setError(nextError instanceof Error ? nextError.message : 'Spine 导出失败。');
       setStatus('Spine ZIP 导出失败，请稍后再试。');
     } finally {
-      setIsRendering(false);
+      finishRenderTask(taskToken);
     }
   }
 
@@ -2045,19 +2510,33 @@ function App() {
   }
 
   function handleResizeWidthChange(value: number): void {
-    const width = Math.min(8192, Math.max(1, Math.round(value)));
-    setResizeWidth(width);
+    const width = Math.min(MAX_FRAME_SIDE, Math.max(1, Math.round(value)));
     if (resizeLocked && cropBounds) {
-      setResizeHeight(Math.max(1, Math.round((width * cropBounds.height) / cropBounds.width)));
+      const fitted = fitDimensionsWithinSide(
+        width,
+        Math.max(1, Math.round((width * cropBounds.height) / cropBounds.width)),
+        MAX_FRAME_SIDE,
+      );
+      setResizeWidth(fitted.width);
+      setResizeHeight(fitted.height);
+      return;
     }
+    setResizeWidth(width);
   }
 
   function handleResizeHeightChange(value: number): void {
-    const height = Math.min(8192, Math.max(1, Math.round(value)));
-    setResizeHeight(height);
+    const height = Math.min(MAX_FRAME_SIDE, Math.max(1, Math.round(value)));
     if (resizeLocked && cropBounds) {
-      setResizeWidth(Math.max(1, Math.round((height * cropBounds.width) / cropBounds.height)));
+      const fitted = fitDimensionsWithinSide(
+        Math.max(1, Math.round((height * cropBounds.width) / cropBounds.height)),
+        height,
+        MAX_FRAME_SIDE,
+      );
+      setResizeWidth(fitted.width);
+      setResizeHeight(fitted.height);
+      return;
     }
+    setResizeHeight(height);
   }
 
   function paintProtectionMaskToPoint(point: MaskPoint): void {
@@ -2283,7 +2762,7 @@ function App() {
   }
 
   function handleWatermarkPointerDown(event: React.PointerEvent<HTMLCanvasElement>): void {
-    if (!referenceFrame) {
+    if (event.button !== 0 || !referenceFrame) {
       return;
     }
 
@@ -2362,13 +2841,204 @@ function App() {
     setWatermarkDragSelection(null);
   }
 
+  function selectCleanupTool(nextTool: CleanupTool): void {
+    watermarkVideoRef.current?.pause();
+    setCleanupTool(nextTool);
+    setWatermarkDragSelection(null);
+    shadowDraggingPointRef.current = null;
+    setStatus(
+      nextTool === 'shadow'
+        ? shadowPathClosed
+          ? '钢笔去阴影已开启，可切换到取色模式继续处理同一路径内的其他阴影色。'
+          : '钢笔去阴影已开启，请沿阴影外围逐点添加锚点。'
+        : '矩形去水印已开启，请在画面上拖拽框选水印。',
+    );
+  }
+
+  function selectShadowInteractionMode(nextMode: ShadowInteractionMode): void {
+    if (nextMode === 'sample' && !shadowPathClosed) {
+      setStatus('请先添加至少 3 个锚点并闭合路径，再切换到阴影取色。');
+      return;
+    }
+
+    setShadowInteractionMode(nextMode);
+    setStatus(
+      nextMode === 'sample'
+        ? '阴影取色已开启，请在闭合路径内点击需要处理的阴影颜色。'
+        : shadowPathClosed
+          ? '钢笔编辑已开启，可拖动锚点；如需增删锚点，请先重新打开路径。'
+          : '钢笔编辑已开启，请沿阴影外围逐点添加锚点。',
+    );
+  }
+
+  function closeShadowPath(): void {
+    if (!referenceFrameAfterCleanup || shadowPoints.length < 3) {
+      setStatus('至少添加 3 个锚点后才能闭合阴影路径。');
+      return;
+    }
+
+    const polygonMask = buildPolygonMask(
+      referenceFrameAfterCleanup.width,
+      referenceFrameAfterCleanup.height,
+      shadowPoints,
+    );
+    if (!polygonMask.some(Boolean)) {
+      setStatus('当前阴影路径面积过小，请调整锚点后重试。');
+      return;
+    }
+
+    setShadowPathClosed(true);
+    setShadowInteractionMode('sample');
+    setShadowSample(null);
+    setStatus('路径已闭合，已切换到阴影取色；同一路径可连续处理多种阴影颜色。');
+  }
+
+  function handleShadowPointerDown(event: React.PointerEvent<HTMLCanvasElement>): void {
+    if (event.button !== 0 || !referenceFrameAfterCleanup) {
+      return;
+    }
+
+    watermarkVideoRef.current?.pause();
+    const rawPoint = getCanvasPoint(
+      event,
+      event.currentTarget,
+      referenceFrameAfterCleanup.width,
+      referenceFrameAfterCleanup.height,
+    );
+    const point = {
+      x: Math.max(0, Math.min(referenceFrameAfterCleanup.width - 1, rawPoint.x)),
+      y: Math.max(0, Math.min(referenceFrameAfterCleanup.height - 1, rawPoint.y)),
+    };
+    if (shadowInteractionMode === 'sample') {
+      if (!shadowPathClosed) {
+        setStatus('请先闭合路径，再使用阴影取色。');
+        return;
+      }
+
+      const polygonMask = buildPolygonMask(
+        referenceFrameAfterCleanup.width,
+        referenceFrameAfterCleanup.height,
+        shadowPoints,
+      );
+      if (!polygonMask[point.y * referenceFrameAfterCleanup.width + point.x]) {
+        setStatus('请在闭合路径内部点击阴影颜色。');
+        return;
+      }
+
+      try {
+        setShadowSample(
+          sampleCanvasColor(referenceFrameAfterCleanup, point.x, point.y, 0),
+        );
+        setStatus('阴影颜色已取样，紫色蒙版内的像素会完整替换为周边背景。');
+      } catch (nextError) {
+        setError(nextError instanceof Error ? nextError.message : '阴影颜色取样失败。');
+      }
+      return;
+    }
+
+    const hitRadius = Math.max(8, referenceFrameAfterCleanup.width / 80);
+    const hitIndex = shadowPoints.findIndex(
+      (anchor) => Math.hypot(anchor.x - point.x, anchor.y - point.y) <= hitRadius,
+    );
+
+    if (!shadowPathClosed && shadowPoints.length >= 3 && hitIndex === 0) {
+      closeShadowPath();
+      return;
+    }
+
+    if (hitIndex >= 0) {
+      shadowDraggingPointRef.current = hitIndex;
+      setShadowSample(null);
+      event.currentTarget.setPointerCapture(event.pointerId);
+      return;
+    }
+
+    if (!shadowPathClosed) {
+      setShadowPoints((current) => [...current, point]);
+      setStatus(`已添加第 ${shadowPoints.length + 1} 个锚点；点击橙色起点或“闭合路径”完成范围。`);
+      return;
+    }
+
+    setStatus('钢笔编辑模式下可拖动锚点；切换到“阴影取色”后再点击颜色。');
+  }
+
+  function handleShadowPointerMove(event: React.PointerEvent<HTMLCanvasElement>): void {
+    const pointIndex = shadowDraggingPointRef.current;
+    if (!referenceFrameAfterCleanup || pointIndex === null) {
+      return;
+    }
+
+    const rawPoint = getCanvasPoint(
+      event,
+      event.currentTarget,
+      referenceFrameAfterCleanup.width,
+      referenceFrameAfterCleanup.height,
+    );
+    const point = {
+      x: Math.max(0, Math.min(referenceFrameAfterCleanup.width - 1, rawPoint.x)),
+      y: Math.max(0, Math.min(referenceFrameAfterCleanup.height - 1, rawPoint.y)),
+    };
+    setShadowPoints((current) =>
+      current.map((anchor, index) => (index === pointIndex ? point : anchor)),
+    );
+  }
+
+  function finishShadowPointDrag(event: React.PointerEvent<HTMLCanvasElement>): void {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+
+    if (shadowDraggingPointRef.current !== null) {
+      setStatus(
+        shadowPathClosed
+          ? '锚点已调整，请切换到“阴影取色”后重新点击阴影颜色。'
+          : '锚点已调整，可继续添加或闭合路径。',
+      );
+    }
+    shadowDraggingPointRef.current = null;
+  }
+
+  function handleShadowPointerCancel(event: React.PointerEvent<HTMLCanvasElement>): void {
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+
+    shadowDraggingPointRef.current = null;
+  }
+
+  function handleUndoShadowPoint(): void {
+    if (!shadowPoints.length || shadowPathClosed) {
+      return;
+    }
+
+    setShadowPoints((current) => current.slice(0, -1));
+    setShadowSample(null);
+    setStatus('已撤销最后一个阴影锚点。');
+  }
+
+  function handleReopenShadowPath(): void {
+    if (!shadowPathClosed) {
+      return;
+    }
+
+    setShadowPathClosed(false);
+    setShadowInteractionMode('pen');
+    setShadowSample(null);
+    setStatus('路径已重新打开，可拖动锚点、撤销锚点或继续添加。');
+  }
+
+  function handleClearShadowDraft(): void {
+    resetShadowDraft();
+    setStatus('已清除当前阴影路径。');
+  }
+
   function handleClearWatermarkRect(): void {
     setWatermarkRect(null);
     setWatermarkDragSelection(null);
     setStatus('已清除当前框选。');
   }
 
-  function invalidateAssetsAfterWatermarkChange(nextStatus: string): void {
+  function invalidateAssetsAfterCleanupChange(nextStatus: string): void {
     if (extractedFrames || processedFrames || result) {
       setFrameSelection(null);
       clearGeneratedAssets(nextStatus);
@@ -2397,7 +3067,7 @@ function App() {
     ]);
     setWatermarkRect(null);
     setWatermarkDragSelection(null);
-    invalidateAssetsAfterWatermarkChange(
+    invalidateAssetsAfterCleanupChange(
       `已完成第 ${watermarkPasses.length + 1} 次去水印，仅作用于 ${formatTimestamp(frameTime)} 对应帧。`,
     );
   }
@@ -2413,7 +3083,7 @@ function App() {
       { scope: 'all', rect: watermarkRect },
     ]);
     setWatermarkDragSelection(null);
-    invalidateAssetsAfterWatermarkChange(
+    invalidateAssetsAfterCleanupChange(
       `已完成第 ${watermarkPasses.length + 1} 次去水印，当前区域将应用到全部抽帧。`,
     );
   }
@@ -2424,7 +3094,7 @@ function App() {
     }
 
     setWatermarkPasses((current) => current.slice(0, -1));
-    invalidateAssetsAfterWatermarkChange('已撤销上一次去水印操作。');
+    invalidateAssetsAfterCleanupChange('已撤销上一次去水印操作。');
   }
 
   function handleClearWatermarkPasses(): void {
@@ -2435,7 +3105,82 @@ function App() {
     setWatermarkPasses([]);
     setWatermarkRect(null);
     setWatermarkDragSelection(null);
-    invalidateAssetsAfterWatermarkChange('已清空步骤4的全部去水印操作。');
+    invalidateAssetsAfterCleanupChange('已清空步骤4的全部去水印操作。');
+  }
+
+  function getShadowSelectionForPass(): ShadowSelection | null {
+    if (!activeShadowSelection) {
+      setStatus('请先闭合阴影路径，并在路径内点击阴影颜色。');
+      return null;
+    }
+
+    return {
+      ...activeShadowSelection,
+      points: activeShadowSelection.points.map((point) => ({ ...point })),
+      seed: { ...activeShadowSelection.seed },
+      sample: { ...activeShadowSelection.sample },
+    };
+  }
+
+  function handleApplyShadowToCurrentFrame(): void {
+    const selection = getShadowSelectionForPass();
+    if (!selection) {
+      return;
+    }
+
+    const frameTime = getNearestFrameTime(sampleTimes, referenceTime);
+    if (frameTime === null) {
+      setStatus('当前片段没有可处理的抽帧时间点。');
+      return;
+    }
+
+    setReferenceTime(frameTime);
+    setShadowPasses((current) => [
+      ...current,
+      { scope: 'frame', time: frameTime, selection },
+    ]);
+    setShadowSample(null);
+    setShadowInteractionMode('sample');
+    invalidateAssetsAfterCleanupChange(
+      `已完成第 ${shadowPasses.length + 1} 次去阴影，仅作用于 ${formatTimestamp(frameTime)} 对应帧；当前路径已保留，可继续取色。`,
+    );
+  }
+
+  function handleApplyShadowToAllFrames(): void {
+    const selection = getShadowSelectionForPass();
+    if (!selection) {
+      return;
+    }
+
+    setShadowPasses((current) => [
+      ...current,
+      { scope: 'all', selection },
+    ]);
+    setShadowSample(null);
+    setShadowInteractionMode('sample');
+    invalidateAssetsAfterCleanupChange(
+      `已完成第 ${shadowPasses.length + 1} 次去阴影，当前路径将应用到全部抽帧；可继续取下一种颜色。`,
+    );
+  }
+
+  function handleUndoShadowPass(): void {
+    if (!shadowPasses.length) {
+      return;
+    }
+
+    setShadowPasses((current) => current.slice(0, -1));
+    invalidateAssetsAfterCleanupChange('已撤销上一次去阴影操作。');
+  }
+
+  function handleClearShadowPasses(): void {
+    if (!shadowPasses.length) {
+      return;
+    }
+
+    setShadowPasses([]);
+    setShadowSample(null);
+    setShadowInteractionMode(shadowPathClosed ? 'sample' : 'pen');
+    invalidateAssetsAfterCleanupChange('已清空步骤4的全部去阴影操作，当前路径已保留。');
   }
 
   function switchAppMode(nextMode: AppMode): void {
@@ -2450,6 +3195,10 @@ function App() {
     setWatermarkRect(null);
     setWatermarkDragSelection(null);
     setWatermarkPasses([]);
+    setCleanupTool('watermark');
+    setWatermarkCanvasZoom(100);
+    resetShadowDraft();
+    setShadowPasses([]);
     setPreviewMode('result');
 
     if (nextMode === 'cutout') {
@@ -2529,18 +3278,25 @@ function App() {
 
         <div className="status-banner status-banner--global">{status}</div>
 
-        {isCutoutMode ? (
-          <ImageCutoutTool onStatusChange={setStatus} />
-        ) : isResizeMode ? (
-          <ImageResizeTool onStatusChange={setStatus} />
-        ) : isCompressMode ? (
-          <ImageCompressTool onStatusChange={setStatus} />
-        ) : (
-        <section className="workspace-grid workspace-grid--single">
-          <div className="panel upload-panel">
-            <div className="panel-head">
-              <h2>1. 上传视频</h2>
-            </div>
+        <Suspense
+          fallback={(
+            <section className="workspace-grid workspace-grid--single">
+              <div className="panel upload-panel">正在加载工具...</div>
+            </section>
+          )}
+        >
+          {isCutoutMode ? (
+            <ImageCutoutTool onStatusChange={setStatus} />
+          ) : isResizeMode ? (
+            <ImageResizeTool onStatusChange={setStatus} />
+          ) : isCompressMode ? (
+            <ImageCompressTool onStatusChange={setStatus} />
+          ) : (
+          <section className="workspace-grid workspace-grid--single">
+            <div className="panel upload-panel">
+              <div className="panel-head">
+                <h2>1. 上传视频</h2>
+              </div>
 
             <input
               ref={inputRef}
@@ -2589,9 +3345,10 @@ function App() {
               ) : null}
             </div>
 
-          </div>
-        </section>
-        )}
+            </div>
+          </section>
+          )}
+        </Suspense>
 
         {isSheetMode && videoMeta ? (
           <section ref={cropPanelRef} className="crop-row">
@@ -2625,6 +3382,9 @@ function App() {
                           setSegmentStart(Number(nextStart.toFixed(3)));
                           setWatermarkPasses([]);
                           setWatermarkRect(null);
+                          setWatermarkCanvasZoom(100);
+                          resetShadowDraft();
+                          setShadowPasses([]);
                         }}
                       />
                       <input
@@ -2640,6 +3400,9 @@ function App() {
                           setSegmentEnd(Number(nextEnd.toFixed(3)));
                           setWatermarkPasses([]);
                           setWatermarkRect(null);
+                          setWatermarkCanvasZoom(100);
+                          resetShadowDraft();
+                          setShadowPasses([]);
                         }}
                       />
                     </div>
@@ -2835,7 +3598,7 @@ function App() {
                     <span>输出宽度（px）</span>
                     <input
                       min={1}
-                      max={8192}
+                      max={MAX_FRAME_SIDE}
                       type="number"
                       value={resizeWidth ?? cropBounds?.width ?? videoMeta.width}
                       onChange={(event) => handleResizeWidthChange(Number(event.target.value) || 1)}
@@ -2846,7 +3609,7 @@ function App() {
                     <span>输出高度（px）</span>
                     <input
                       min={1}
-                      max={8192}
+                      max={MAX_FRAME_SIDE}
                       type="number"
                       value={resizeHeight ?? cropBounds?.height ?? videoMeta.height}
                       onChange={(event) => handleResizeHeightChange(Number(event.target.value) || 1)}
@@ -2894,7 +3657,7 @@ function App() {
               <div ref={controlsPanelRef} className="workflow-action-row">
                 <div>
                   <strong>片段与裁剪确认完成后，继续提取参考帧</strong>
-                  <span>下一步进入去水印和抠像设置。</span>
+                  <span>下一步进入去水印、去阴影和抠像设置。</span>
                 </div>
                 <button
                   className="primary-button"
@@ -2907,7 +3670,7 @@ function App() {
                     setStatus(
                       !isSheetMode
                         ? '已提取参考帧，请点击背景颜色开始抠图。'
-                        : '参考帧已就绪，请先设置去水印区域，再进行抠像。'
+                        : '参考帧已就绪，请先设置去水印或去阴影区域，再进行抠像。'
                     );
                   }}
                 >
@@ -2923,9 +3686,33 @@ function App() {
         <section ref={chromaPanelRef} className="panel frame-picker-panel">
           <div className="panel-head panel-head--stack">
             <div>
-              <h2>4. 去水印</h2>
-              <span>固定水印可作用于全部帧；移动或遗漏水印可暂停后只处理当前帧。</span>
+              <h2>4. 去水印 / 去阴影</h2>
+              <span>矩形工具处理水印；钢笔工具沿阴影外围自定义路径，并只识别路径内的阴影颜色。</span>
             </div>
+          </div>
+
+          <div className="cleanup-tool-switch">
+            <div className="segmented-control">
+              <button
+                className={`segmented-button ${cleanupTool === 'watermark' ? 'is-active' : ''}`}
+                type="button"
+                onClick={() => selectCleanupTool('watermark')}
+              >
+                矩形去水印
+              </button>
+              <button
+                className={`segmented-button ${cleanupTool === 'shadow' ? 'is-active' : ''}`}
+                type="button"
+                onClick={() => selectCleanupTool('shadow')}
+              >
+                钢笔去阴影
+              </button>
+            </div>
+            <span>
+              {cleanupTool === 'watermark'
+                ? '在画面上拖拽矩形范围。'
+                : '逐点添加锚点，点击橙色起点闭合；闭合后点击阴影取色。'}
+            </span>
           </div>
 
           <div className="reference-toolbar">
@@ -2943,7 +3730,13 @@ function App() {
 
             <div className="reference-meta">
               <strong>{videoMeta ? formatTimestamp(referenceTime) : '00:00.000'}</strong>
-              <span>{isReferenceLoading ? '正在更新当前帧...' : '播放右侧视频或拖动时间轴，找到出现水印的帧'}</span>
+              <span>
+                {isReferenceLoading
+                  ? '正在更新当前帧...'
+                  : cleanupTool === 'watermark'
+                    ? '播放右侧视频或拖动时间轴，找到出现水印的帧'
+                    : '播放右侧视频或拖动时间轴，找到阴影轮廓清楚的帧'}
+              </span>
             </div>
           </div>
 
@@ -2951,25 +3744,102 @@ function App() {
             <div className="canvas-card">
               <div className="canvas-head">
                 <div className="canvas-title">
-                  <span>去水印区域</span>
-                  <small>{watermarkRect ? '已框选，请选择应用到全部帧或仅当前帧' : `当前帧累计应用 ${currentWatermarkRects.length} 个区域`}</small>
+                  <span>{cleanupTool === 'watermark' ? '去水印区域' : '钢笔阴影路径'}</span>
+                  <small>
+                    {cleanupTool === 'watermark'
+                      ? watermarkRect
+                        ? '已框选，请选择应用到全部帧或仅当前帧'
+                        : `当前帧累计应用 ${currentWatermarkRects.length} 个去水印区域`
+                      : shadowPathClosed
+                        ? shadowInteractionMode === 'sample'
+                          ? shadowSample
+                            ? '已取样，紫色蒙版内的阴影会完整替换为背景'
+                            : '取色模式已开启，请点击路径内的阴影颜色'
+                          : '钢笔编辑模式已开启，可拖动锚点调整范围'
+                        : shadowPoints.length
+                          ? `已添加 ${shadowPoints.length} 个锚点`
+                          : `当前帧累计应用 ${currentShadowSelections.length} 个去阴影路径`}
+                  </small>
+                </div>
+                <div className="canvas-zoom-actions">
+                  <button
+                    aria-label="缩小清理画布"
+                    className="ghost-button"
+                    disabled={watermarkCanvasZoom <= MIN_PREVIEW_ZOOM}
+                    type="button"
+                    onClick={() => setWatermarkCanvasZoom((current) => adjustPreviewZoom(current, -1))}
+                  >
+                    −
+                  </button>
+                  <span>{watermarkCanvasZoom}%</span>
+                  <button
+                    aria-label="放大清理画布"
+                    className="ghost-button"
+                    disabled={watermarkCanvasZoom >= MAX_PREVIEW_ZOOM}
+                    type="button"
+                    onClick={() => setWatermarkCanvasZoom((current) => adjustPreviewZoom(current, 1))}
+                  >
+                    +
+                  </button>
+                  <button
+                    className="ghost-button"
+                    disabled={watermarkCanvasZoom === 100}
+                    type="button"
+                    onClick={() => setWatermarkCanvasZoom(100)}
+                  >
+                    适应
+                  </button>
                 </div>
               </div>
-              <div className="canvas-surface checkerboard">
-                <canvas
-                  ref={watermarkCanvasRef}
-                  className="preview-canvas"
-                  onPointerCancel={handleWatermarkPointerCancel}
-                  onPointerDown={handleWatermarkPointerDown}
-                  onPointerMove={handleWatermarkPointerMove}
-                  onPointerUp={handleWatermarkPointerUp}
-                />
+              <div
+                ref={watermarkCanvasViewportRef}
+                className="canvas-surface checkerboard watermark-canvas-viewport"
+                title="滚动鼠标滚轮可缩放画布；按住鼠标滚轮可拖动画布"
+              >
+                <div
+                  className="watermark-canvas-stage"
+                  style={{ width: `${watermarkCanvasZoom}%` }}
+                >
+                  <canvas
+                    ref={watermarkCanvasRef}
+                    className={`preview-canvas ${cleanupTool === 'shadow' ? 'is-shadow-pen' : ''}`}
+                    onPointerCancel={
+                      cleanupTool === 'watermark'
+                        ? handleWatermarkPointerCancel
+                        : handleShadowPointerCancel
+                    }
+                    onPointerDown={
+                      cleanupTool === 'watermark'
+                        ? handleWatermarkPointerDown
+                        : handleShadowPointerDown
+                    }
+                    onPointerMove={
+                      cleanupTool === 'watermark'
+                        ? handleWatermarkPointerMove
+                        : handleShadowPointerMove
+                    }
+                    onPointerUp={
+                      cleanupTool === 'watermark'
+                        ? handleWatermarkPointerUp
+                        : finishShadowPointDrag
+                    }
+                  />
+                </div>
               </div>
               <div className="canvas-footer">
                 <span>
-                  {watermarkRect
-                    ? `区域：x=${watermarkRect.x}, y=${watermarkRect.y}, 宽=${watermarkRect.width}, 高=${watermarkRect.height}`
-                    : `当前帧：${formatTimestamp(getNearestFrameTime(sampleTimes, referenceTime) ?? referenceTime)}`}
+                  {cleanupTool === 'watermark'
+                    ? watermarkRect
+                      ? `区域：x=${watermarkRect.x}, y=${watermarkRect.y}, 宽=${watermarkRect.width}, 高=${watermarkRect.height}`
+                      : `当前帧：${formatTimestamp(getNearestFrameTime(sampleTimes, referenceTime) ?? referenceTime)}`
+                    : shadowSample
+                      ? `阴影取样：RGB(${shadowSample.rgb.r}, ${shadowSample.rgb.g}, ${shadowSample.rgb.b})`
+                    : shadowPathClosed
+                        ? shadowInteractionMode === 'sample'
+                          ? '取色模式：点击路径内的阴影颜色；每次执行后路径会保留'
+                          : '钢笔编辑模式：可拖动锚点；切换到取色模式后再点击颜色'
+                        : '橙色锚点是起点；至少需要 3 个锚点'}
+                  {' · 滚轮可缩放画布；按住鼠标滚轮可拖动查看细节'}
                 </span>
               </div>
             </div>
@@ -2977,8 +3847,8 @@ function App() {
             <div className="canvas-card">
               <div className="canvas-head">
                 <div className="canvas-title">
-                  <span>水印动画预览</span>
-                  <small>水印不在每一帧出现时，先播放并暂停到目标画面</small>
+                  <span>清理动画预览</span>
+                  <small>水印或阴影并非每帧相同时，先播放并暂停到目标画面</small>
                 </div>
               </div>
               <div className="canvas-surface">
@@ -3015,62 +3885,187 @@ function App() {
             </div>
           </div>
 
-          <div className="watermark-toolbar">
-            <div className="watermark-toolbar__copy">
-              <strong>
-                已执行 {watermarkPasses.length} 次去水印 · 全部帧 {watermarkPasses.filter((pass) => pass.scope === 'all').length} 次 · 当前帧 {watermarkPasses.filter((pass) => pass.scope === 'frame').length} 次
-              </strong>
-              <span>优先对全部帧处理固定水印；仅在遗漏画面上使用当前帧补漏。</span>
+          {cleanupTool === 'watermark' ? (
+            <div className="watermark-toolbar">
+              <div className="watermark-toolbar__copy">
+                <strong>
+                  已执行 {watermarkPasses.length} 次去水印 · 全部帧 {watermarkPasses.filter((pass) => pass.scope === 'all').length} 次 · 当前帧 {watermarkPasses.filter((pass) => pass.scope === 'frame').length} 次
+                </strong>
+                <span>优先对全部帧处理固定水印；仅在遗漏画面上使用当前帧补漏。</span>
+              </div>
+              <div className="watermark-toolbar__actions">
+                <button
+                  className="primary-button"
+                  disabled={isRendering || !watermarkRect}
+                  type="button"
+                  onClick={handleApplyWatermarkToAllFrames}
+                >
+                  对全部帧执行去水印
+                </button>
+                <button
+                  className="secondary-button secondary-button--slate"
+                  disabled={isRendering || !watermarkRect}
+                  type="button"
+                  onClick={handleApplyWatermarkToCurrentFrame}
+                >
+                  执行当前帧去水印
+                </button>
+                <button
+                  className="ghost-button"
+                  disabled={!watermarkRect}
+                  type="button"
+                  onClick={handleClearWatermarkRect}
+                >
+                  清除当前框选
+                </button>
+                <button
+                  className="ghost-button"
+                  disabled={!watermarkPasses.length}
+                  type="button"
+                  onClick={handleUndoWatermarkPass}
+                >
+                  撤销上一次
+                </button>
+                <button
+                  className="ghost-button"
+                  disabled={!watermarkPasses.length}
+                  type="button"
+                  onClick={handleClearWatermarkPasses}
+                >
+                  清空全部
+                </button>
+              </div>
             </div>
-            <div className="watermark-toolbar__actions">
-              <button
-                className="primary-button"
-                disabled={isRendering || !watermarkRect}
-                type="button"
-                onClick={handleApplyWatermarkToAllFrames}
-              >
-                对全部帧执行去水印
-              </button>
-              <button
-                className="secondary-button secondary-button--slate"
-                disabled={isRendering || !watermarkRect}
-                type="button"
-                onClick={handleApplyWatermarkToCurrentFrame}
-              >
-                执行当前帧去水印
-              </button>
-              <button
-                className="ghost-button"
-                disabled={!watermarkRect}
-                type="button"
-                onClick={handleClearWatermarkRect}
-              >
-                清除当前框选
-              </button>
-              <button
-                className="ghost-button"
-                disabled={!watermarkPasses.length}
-                type="button"
-                onClick={handleUndoWatermarkPass}
-              >
-                撤销上一次
-              </button>
-              <button
-                className="ghost-button"
-                disabled={!watermarkPasses.length}
-                type="button"
-                onClick={handleClearWatermarkPasses}
-              >
-                清空全部
-              </button>
+          ) : (
+            <div className="watermark-toolbar shadow-toolbar">
+              <div className="watermark-toolbar__copy">
+                <strong>
+                  已执行 {shadowPasses.length} 次去阴影 · 全部帧 {shadowPasses.filter((pass) => pass.scope === 'all').length} 次 · 当前帧 {shadowPasses.filter((pass) => pass.scope === 'frame').length} 次
+                </strong>
+                <span>路径只需画一次；每次取色后执行去阴影，路径会自动保留。</span>
+                <div className="cleanup-tool-switch shadow-mode-switch">
+                  <div className="segmented-control">
+                    <button
+                      className={`segmented-button ${shadowInteractionMode === 'pen' ? 'is-active' : ''}`}
+                      type="button"
+                      onClick={() => selectShadowInteractionMode('pen')}
+                    >
+                      钢笔编辑
+                    </button>
+                    <button
+                      className={`segmented-button ${shadowInteractionMode === 'sample' ? 'is-active' : ''}`}
+                      disabled={!shadowPathClosed}
+                      type="button"
+                      onClick={() => selectShadowInteractionMode('sample')}
+                    >
+                      阴影取色
+                    </button>
+                  </div>
+                  <span>
+                    {shadowInteractionMode === 'pen'
+                      ? '添加、闭合或调整路径锚点。'
+                      : '只在已闭合路径内点击需要去除的颜色。'}
+                  </span>
+                </div>
+                <label className="shadow-tolerance">
+                  <span>阴影识别容差：{shadowTolerance}</span>
+                  <input
+                    max={120}
+                    min={0}
+                    type="range"
+                    value={shadowTolerance}
+                    onChange={(event) => setShadowTolerance(Number(event.target.value))}
+                  />
+                </label>
+              </div>
+              <div className="watermark-toolbar__actions">
+                {!shadowPathClosed ? (
+                  <>
+                    <button
+                      className="secondary-button secondary-button--slate"
+                      disabled={shadowPoints.length < 3}
+                      type="button"
+                      onClick={closeShadowPath}
+                    >
+                      闭合路径
+                    </button>
+                    <button
+                      className="ghost-button"
+                      disabled={!shadowPoints.length}
+                      type="button"
+                      onClick={handleUndoShadowPoint}
+                    >
+                      撤销锚点
+                    </button>
+                  </>
+                ) : (
+                  <button
+                    className="ghost-button"
+                    type="button"
+                    onClick={handleReopenShadowPath}
+                  >
+                    重新打开路径
+                  </button>
+                )}
+                <button
+                  className="primary-button"
+                  disabled={isRendering || !activeShadowSelection}
+                  type="button"
+                  onClick={handleApplyShadowToAllFrames}
+                >
+                  对全部帧执行去阴影
+                </button>
+                <button
+                  className="secondary-button secondary-button--slate"
+                  disabled={isRendering || !activeShadowSelection}
+                  type="button"
+                  onClick={handleApplyShadowToCurrentFrame}
+                >
+                  执行当前帧去阴影
+                </button>
+                <button
+                  className="ghost-button"
+                  disabled={!shadowPoints.length}
+                  type="button"
+                  onClick={handleClearShadowDraft}
+                >
+                  清除当前路径
+                </button>
+                <button
+                  className="ghost-button"
+                  disabled={!shadowPasses.length}
+                  type="button"
+                  onClick={handleUndoShadowPass}
+                >
+                  撤销上一次
+                </button>
+                <button
+                  className="ghost-button"
+                  disabled={!shadowPasses.length}
+                  type="button"
+                  onClick={handleClearShadowPasses}
+                >
+                  清空全部
+                </button>
+              </div>
             </div>
-          </div>
+          )}
 
           {watermarkPasses.length ? (
             <div className="watermark-pass-list">
               {watermarkPasses.map((pass, index) => (
                 <span key={`${pass.scope}-${pass.scope === 'frame' ? pass.time : 'all'}-${index}`}>
                   #{index + 1} · {pass.scope === 'all' ? '全部帧' : formatTimestamp(pass.time)} · x={pass.rect.x}, y={pass.rect.y}, {pass.rect.width}×{pass.rect.height}
+                </span>
+              ))}
+            </div>
+          ) : null}
+
+          {shadowPasses.length ? (
+            <div className="watermark-pass-list shadow-pass-list">
+              {shadowPasses.map((pass, index) => (
+                <span key={`${pass.scope}-${pass.scope === 'frame' ? pass.time : 'all'}-${index}`}>
+                  阴影 #{index + 1} · {pass.scope === 'all' ? '全部帧' : formatTimestamp(pass.time)} · {pass.selection.points.length} 个锚点 · 容差 {pass.selection.tolerance}
                 </span>
               ))}
             </div>
@@ -3083,7 +4078,7 @@ function App() {
           <div className="panel-head panel-head--stack">
             <div>
               <h2>5. 参考帧与抠像预览</h2>
-              <span>直接在左侧基底图里点击背景颜色；当前帧会使用步骤4已经执行的去水印结果。</span>
+              <span>直接在左侧基底图里点击背景颜色；当前帧会使用步骤4已经执行的去水印和去阴影结果。</span>
             </div>
           </div>
 
@@ -3381,7 +4376,9 @@ function App() {
                 max={24}
                 type="number"
                 value={framesPerSecond}
-                onChange={(event) => setFramesPerSecond(Number(event.target.value) || 1)}
+                onChange={(event) => setFramesPerSecond(
+                  Math.min(24, Math.max(1, Math.round(Number(event.target.value) || 1))),
+                )}
               />
             </label>
 
@@ -3408,6 +4405,7 @@ function App() {
           {frameLimitExceeded ? (
             <p className="error-text">当前设置预计提取 {estimatedFrameCount} 帧，建议缩短片段或降低每秒帧数。</p>
           ) : null}
+          {generationBudgetError ? <p className="error-text">{generationBudgetError}</p> : null}
 
           <div className="segmented-control segmented-control--result">
             <button
@@ -3441,7 +4439,7 @@ function App() {
                 } ${
                   resultTransparent ? 'preview-wrap--transparent' : 'preview-wrap--solid'
                 }`}
-                title="鼠标滚轮缩放预览"
+                title="鼠标滚轮缩放预览；按住鼠标滚轮可拖动预览"
               >
                 <div
                   className="sequence-animation-stage"
@@ -3599,7 +4597,9 @@ function App() {
                   max={8}
                   type="number"
                   value={columns}
-                  onChange={(event) => setColumns(Number(event.target.value) || 1)}
+                  onChange={(event) => setColumns(
+                    Math.min(8, Math.max(1, Math.round(Number(event.target.value) || 1))),
+                  )}
                 />
               </label>
 
@@ -3610,7 +4610,9 @@ function App() {
                   max={48}
                   type="number"
                   value={gap}
-                  onChange={(event) => setGap(Number(event.target.value) || 0)}
+                  onChange={(event) => setGap(
+                    Math.min(48, Math.max(0, Math.round(Number(event.target.value) || 0))),
+                  )}
                 />
               </label>
 
