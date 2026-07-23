@@ -57,8 +57,11 @@ import {
   createIntervalFrameSelection,
   filterAssetsBySelection,
   getFrameSelectionSignature,
+  getSelectedAttackFrameIndices,
   getSelectedFrameCount,
+  normalizeAttackFrameSelection,
   normalizeFrameSelection,
+  type FrameAttackSelection,
   type FrameSelection,
 } from './lib/frameSelection';
 import {
@@ -573,6 +576,7 @@ function buildSpineDraftFromAssets(
   width: number,
   height: number,
   sheetOptions: SheetOptions,
+  attackFrameIndices: number[],
 ): SpineDraft {
   const transparent = Boolean(assets.processed);
   const draftFrames = transparent ? toTransparentSheetFrames(assets.processed ?? []) : assets.frames;
@@ -585,6 +589,7 @@ function buildSpineDraftFromAssets(
     sheetOptions,
     sourceFrameIndices: Array.from({ length: draftFrames.length }, (_, index) => index),
     sourceFrameCount: draftFrames.length,
+    attackFrameIndices,
   };
 }
 
@@ -661,6 +666,7 @@ function App() {
   const [shadowPasses, setShadowPasses] = useState<ShadowPass[]>([]);
   const [watermarkCanvasZoom, setWatermarkCanvasZoom] = useState(100);
   const [frameSelection, setFrameSelection] = useState<FrameSelection | null>(null);
+  const [attackFrameSelection, setAttackFrameSelection] = useState<FrameAttackSelection | null>(null);
   const [samplePoint, setSamplePoint] = useState<SamplePoint | null>(null);
   const [colorSample, setColorSample] = useState<ColorSample | null>(null);
   const [committedColorKeys, setCommittedColorKeys] = useState<ColorKeyOptions[]>([]);
@@ -869,6 +875,10 @@ function App() {
   const normalizedFrameSelection = useMemo(
     () => normalizeFrameSelection(frameSelection, extractedFrames?.length ?? 0),
     [extractedFrames?.length, frameSelection],
+  );
+  const normalizedAttackFrameSelection = useMemo(
+    () => normalizeAttackFrameSelection(attackFrameSelection, extractedFrames?.length ?? 0),
+    [attackFrameSelection, extractedFrames?.length],
   );
   const frameSelectionSignature = useMemo(
     () => getFrameSelectionSignature(normalizedFrameSelection, extractedFrames?.length ?? 0),
@@ -1804,6 +1814,7 @@ function App() {
     }
 
     setFrameSelection(null);
+    setAttackFrameSelection(null);
     clearGeneratedAssets('视频片段或裁剪范围已更新，请重新抽帧并生成最新结果。');
   }, [
     framesPerSecond,
@@ -1821,6 +1832,7 @@ function App() {
     resetProtectionMask();
     if (extractedFrames || processedFrames || result) {
       setFrameSelection(null);
+      setAttackFrameSelection(null);
       clearGeneratedAssets('裁剪范围或视频已更新，请重新设置去水印或去阴影区域并抽帧。');
     }
   }, [
@@ -1855,6 +1867,7 @@ function App() {
     setCommittedColorKeys([]);
     resetProtectionMask();
     setFrameSelection(null);
+    setAttackFrameSelection(null);
     setWatermarkRect(null);
     setWatermarkDragSelection(null);
     setWatermarkPasses([]);
@@ -2053,6 +2066,9 @@ function App() {
       current
         ? normalizeFrameSelection(current, framesWithCleanupHandled.length)
         : createFrameSelection(framesWithCleanupHandled.length),
+    );
+    setAttackFrameSelection((current) =>
+      normalizeAttackFrameSelection(current, framesWithCleanupHandled.length),
     );
 
     if (!activeColorKeySequence.length) {
@@ -2260,6 +2276,11 @@ function App() {
         outputVideoMeta.width,
         outputVideoMeta.height,
         sheetOptions,
+        getSelectedAttackFrameIndices(
+          normalizedFrameSelection,
+          normalizedAttackFrameSelection,
+          extractedFrames?.length ?? assets.frames.length,
+        ),
       );
 
       pendingSpineScrollTopRef.current = window.scrollY;
@@ -2351,6 +2372,9 @@ function App() {
         sheetOptions,
         frames: usedFrameIndices.map((index) => spineDraft.frames[index]),
         sourceFrameIndices: usedFrameIndices,
+        attackFrameIndices: usedFrameIndices.filter((index) => (
+          spineDraft.attackFrameIndices.includes(index)
+        )),
       };
       const atlas = await renderFrameSheet(
         exportDraft.frames,
@@ -2745,6 +2769,19 @@ function App() {
     });
   }
 
+  function handleAttackFrameSelectionChange(index: number, checked: boolean): void {
+    setAttackFrameSelection((current) => {
+      const base = normalizeAttackFrameSelection(current, extractedFrames?.length ?? 0);
+      if (index < 0 || index >= base.length) {
+        return base;
+      }
+
+      const next = [...base];
+      next[index] = checked;
+      return next;
+    });
+  }
+
   function handleSelectAllFrames(): void {
     setFrameSelection(createFrameSelection(extractedFrames?.length ?? 0));
   }
@@ -3041,6 +3078,7 @@ function App() {
   function invalidateAssetsAfterCleanupChange(nextStatus: string): void {
     if (extractedFrames || processedFrames || result) {
       setFrameSelection(null);
+      setAttackFrameSelection(null);
       clearGeneratedAssets(nextStatus);
       return;
     }
@@ -3192,6 +3230,7 @@ function App() {
     setCommittedColorKeys([]);
     resetProtectionMask();
     setFrameSelection(null);
+    setAttackFrameSelection(null);
     setWatermarkRect(null);
     setWatermarkDragSelection(null);
     setWatermarkPasses([]);
@@ -4550,25 +4589,39 @@ function App() {
               <div className="frame-picker-grid">
                 {(extractedFrames ?? []).map((frame, index) => {
                   const checked = normalizedFrameSelection[index] !== false;
+                  const isAttackFrame = normalizedAttackFrameSelection[index] === true;
 
                   return (
-                    <label
+                    <div
                       key={`${frame.label}-${index}`}
-                      className={`frame-picker-card ${checked ? 'is-active' : 'is-disabled'}`}
+                      className={`frame-picker-card ${checked ? 'is-active' : 'is-disabled'} ${isAttackFrame ? 'is-attack' : ''}`}
                     >
-                      <input
-                        checked={checked}
-                        type="checkbox"
-                        onChange={(event) => handleFrameSelectionChange(index, event.target.checked)}
-                      />
-                      <div className="frame-picker-thumb">
-                        <img alt={`第 ${index + 1} 帧缩略图`} src={frameThumbnailUrls[index]} />
-                      </div>
-                      <div className="frame-picker-meta">
-                        <strong>第 {index + 1} 帧</strong>
-                        <span>{frame.label}</span>
-                      </div>
-                    </label>
+                      <label className="frame-picker-card__selection">
+                        <input
+                          checked={checked}
+                          type="checkbox"
+                          onChange={(event) => handleFrameSelectionChange(index, event.target.checked)}
+                        />
+                        <div className="frame-picker-thumb">
+                          <img alt={`第 ${index + 1} 帧缩略图`} src={frameThumbnailUrls[index]} />
+                        </div>
+                        <div className="frame-picker-meta">
+                          <strong>第 {index + 1} 帧</strong>
+                          <span>{frame.label}</span>
+                        </div>
+                      </label>
+                      <label
+                        className="frame-picker-card__attack"
+                        title="标记为攻击命中帧"
+                      >
+                        <input
+                          aria-label={`标记第 ${index + 1} 帧为攻击命中帧`}
+                          checked={isAttackFrame}
+                          type="checkbox"
+                          onChange={(event) => handleAttackFrameSelectionChange(index, event.target.checked)}
+                        />
+                      </label>
+                    </div>
                   );
                 })}
               </div>

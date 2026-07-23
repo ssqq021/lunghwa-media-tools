@@ -121,6 +121,7 @@ export type SpineDraft = {
   sheetOptions: SheetOptions;
   sourceFrameIndices: number[];
   sourceFrameCount: number;
+  attackFrameIndices: number[];
 };
 
 export type LayoutMetrics = {

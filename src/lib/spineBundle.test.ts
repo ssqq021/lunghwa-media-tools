@@ -31,6 +31,7 @@ const draft: SpineDraft = {
   },
   sourceFrameIndices: [0, 2],
   sourceFrameCount: 3,
+  attackFrameIndices: [2],
 };
 
 const options: SpineExportOptions = {
@@ -88,9 +89,10 @@ describe('spine bundle helpers', () => {
       columns: 2,
       gap: 8,
       frames: [
-        { name: 'demo-clip-spine-001', sourceFrame: 0, x: 0, y: 0, width: 64, height: 64 },
-        { name: 'demo-clip-spine-003', sourceFrame: 2, x: 72, y: 0, width: 64, height: 64 },
+        { name: 'demo-clip-spine-001', sourceFrame: 0, isAttackFrame: false, x: 0, y: 0, width: 64, height: 64 },
+        { name: 'demo-clip-spine-003', sourceFrame: 2, isAttackFrame: true, x: 72, y: 0, width: 64, height: 64 },
       ],
+      attackFrames: [{ name: 'demo-clip-spine-003', sourceFrame: 2 }],
       animations: [
         { name: 'idle', startFrame: 0, endFrame: 0, loop: true, fps: 12, frames: ['demo-clip-spine-001'] },
         { name: 'attack', startFrame: 2, endFrame: 2, loop: true, fps: 24, frames: ['demo-clip-spine-003'] },

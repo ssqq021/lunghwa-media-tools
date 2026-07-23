@@ -1,6 +1,7 @@
 import type { ExtractedFrame, ProcessedFrame } from '../types';
 
 export type FrameSelection = boolean[];
+export type FrameAttackSelection = boolean[];
 
 export type GeneratedFrameAssets = {
   frames: ExtractedFrame[];
@@ -28,6 +29,33 @@ export function normalizeFrameSelection(
 ): FrameSelection {
   const safeCount = Math.max(0, Math.floor(frameCount));
   return Array.from({ length: safeCount }, (_, index) => selection?.[index] !== false);
+}
+
+export function normalizeAttackFrameSelection(
+  selection: FrameAttackSelection | null | undefined,
+  frameCount: number,
+): FrameAttackSelection {
+  const safeCount = Math.max(0, Math.floor(frameCount));
+  return Array.from({ length: safeCount }, (_, index) => selection?.[index] === true);
+}
+
+export function getSelectedAttackFrameIndices(
+  selection: FrameSelection | null | undefined,
+  attackSelection: FrameAttackSelection | null | undefined,
+  frameCount: number,
+): number[] {
+  const frames = normalizeFrameSelection(selection, frameCount);
+  const attacks = normalizeAttackFrameSelection(attackSelection, frameCount);
+  const indices: number[] = [];
+  let selectedIndex = 0;
+
+  for (const [index, selected] of frames.entries()) {
+    if (!selected) continue;
+    if (attacks[index]) indices.push(selectedIndex);
+    selectedIndex += 1;
+  }
+
+  return indices;
 }
 
 export function getSelectedFrameCount(

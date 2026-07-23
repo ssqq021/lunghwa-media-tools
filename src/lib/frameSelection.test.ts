@@ -6,7 +6,9 @@ import {
   filterAssetsBySelection,
   filterFramesBySelection,
   getFrameSelectionSignature,
+  getSelectedAttackFrameIndices,
   getSelectedFrameCount,
+  normalizeAttackFrameSelection,
   normalizeFrameSelection,
 } from './frameSelection';
 
@@ -53,6 +55,15 @@ describe('frame selection helpers', () => {
 
   it('builds a stable selection signature for preview invalidation', () => {
     expect(getFrameSelectionSignature([true, false, true], 3)).toBe('101');
+  });
+
+  it('keeps attack markers only for selected frames and remaps them to export order', () => {
+    expect(normalizeAttackFrameSelection([true], 3)).toEqual([true, false, false]);
+    expect(getSelectedAttackFrameIndices(
+      [true, false, true, true],
+      [false, true, true, true],
+      4,
+    )).toEqual([1, 2]);
   });
 
   it('filters plain frames by selection order', () => {

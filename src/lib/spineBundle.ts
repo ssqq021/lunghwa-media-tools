@@ -56,10 +56,15 @@ type UnitySpriteManifest = {
   frames: Array<{
     name: string;
     sourceFrame: number;
+    isAttackFrame: boolean;
     x: number;
     y: number;
     width: number;
     height: number;
+  }>;
+  attackFrames: Array<{
+    name: string;
+    sourceFrame: number;
   }>;
   animations: Array<{
     name: string;
@@ -288,20 +293,28 @@ export function buildUnitySpriteManifest(
   atlas: SpineAtlasExport,
 ): UnitySpriteManifest {
   validateAnimationClips(options.animations);
+  const attackFrameIndices = new Set(draft.attackFrameIndices);
+  const frames = draft.frames.map((_, index) => {
+    const rect = getFrameRect(atlas, index);
+    const sourceFrame = getSourceFrameIndex(draft, index);
+    return {
+      name: getSpineFrameStem(draft.baseName, sourceFrame),
+      sourceFrame,
+      isAttackFrame: attackFrameIndices.has(sourceFrame),
+      ...rect,
+    };
+  });
+
   return {
     version: 1,
     texture: getSpineAtlasFileName(draft.baseName),
     coordinateOrigin: 'top-left',
     columns: draft.sheetOptions.columns,
     gap: draft.sheetOptions.gap,
-    frames: draft.frames.map((_, index) => {
-      const rect = getFrameRect(atlas, index);
-      return {
-        name: getSpineFrameStem(draft.baseName, getSourceFrameIndex(draft, index)),
-        sourceFrame: getSourceFrameIndex(draft, index),
-        ...rect,
-      };
-    }),
+    frames,
+    attackFrames: frames
+      .filter((frame) => frame.isAttackFrame)
+      .map(({ name, sourceFrame }) => ({ name, sourceFrame })),
     animations: options.animations.map((clip) => ({
       name: clip.name.trim(),
       ...getClipRange(clip, draft.sourceFrameCount),

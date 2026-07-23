@@ -1870,15 +1870,19 @@ button {
 }
 
 .frame-picker-card {
+  position: relative;
+  border: 1px solid rgba(148, 163, 184, 0.24);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.84);
+  transition: border-color 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease, opacity 0.18s ease;
+}
+
+.frame-picker-card__selection {
   display: flex;
   flex-direction: column;
   gap: 8px;
   padding: 10px;
-  border: 1px solid rgba(148, 163, 184, 0.24);
-  border-radius: 16px;
-  background: rgba(255, 255, 255, 0.84);
   cursor: pointer;
-  transition: border-color 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease, opacity 0.18s ease;
 }
 
 .frame-picker-card:hover {
@@ -1896,8 +1900,44 @@ button {
   opacity: 0.58;
 }
 
-.frame-picker-card input[type='checkbox'] {
+.frame-picker-card.is-attack {
+  border-color: rgba(249, 115, 22, 0.76);
+  box-shadow: 0 10px 24px rgba(249, 115, 22, 0.16);
+}
+
+.frame-picker-card__selection > input[type='checkbox'] {
   margin: 0;
+}
+
+.frame-picker-card__attack {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border: 1px solid rgba(249, 115, 22, 0.48);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: 0 4px 10px rgba(148, 163, 184, 0.18);
+  cursor: pointer;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.16s ease;
+}
+
+.frame-picker-card:hover .frame-picker-card__attack,
+.frame-picker-card:focus-within .frame-picker-card__attack {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.frame-picker-card__attack input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: #f97316;
 }
 
 .frame-picker-thumb {
